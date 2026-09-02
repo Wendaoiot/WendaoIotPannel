@@ -1,0 +1,35 @@
+# Go
+server/server.exe
+server/vendor/
+
+# Node
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+Thumbs.db
+
+# Build output
+tools/simulator/simulator.exe
+
+# Config with secrets
+*.local.yaml
+
+# Firmware / OTA binary artifacts (source only in repo; distributed via Releases)
+*.soc
+*.binpkg
+*.bin
+*.zip
+# 例外：core/ 下合宙官方固件（烧录 demo 必需），仅保留这两个
+!hardware/780epm_common/core/**/*.soc
+
+# Device runtime logs (may contain real IMEI)
+log.txt
+*.log
