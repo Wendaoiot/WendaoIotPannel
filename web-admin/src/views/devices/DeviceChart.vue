@@ -1,18 +1,10 @@
 <template>
-  <div class="page-container">
-    <div class="toolbar">
-      <div class="toolbar-left">
-        <el-button @click="$router.back()">
-          <el-icon><ArrowLeft /></el-icon>
-          返回
-        </el-button>
-        <h2>设备数据图表 - {{ deviceId }}</h2>
-      </div>
-      <div class="toolbar-right">
+  <div class="tab-pane">
+    <div class="tab-toolbar">
         <el-select
           v-model="selectedTag"
           placeholder="选择数据项"
-          style="width: 150px; margin-right: 12px;"
+          style="width: 150px;"
         >
           <el-option
             v-for="tag in availableTags"
@@ -37,14 +29,13 @@
           style="margin-right: 12px;"
         />
         <el-button :icon="Refresh" @click="fetchData" :loading="loading">刷新</el-button>
-      </div>
     </div>
 
     <el-row :gutter="20">
       <el-col :span="16">
-        <el-card shadow="hover" style="border-radius: 12px;">
+        <el-card shadow="hover" class="trend-card">
           <template #header>
-            <span style="font-weight: 600; color: #1f2329;">{{ getTagName(selectedTag) }} 趋势图</span>
+            <span class="card-head-title">{{ getTagName(selectedTag) }} 趋势图</span>
           </template>
           <div class="chart-container">
             <svg ref="chartSvg" class="line-chart" viewBox="0 0 800 300" preserveAspectRatio="xMidYMid meet">
@@ -52,7 +43,7 @@
               <line v-for="i in 5" :key="'grid-' + i"
                 :x1="60" :y1="i * 60"
                 :x2="800" :y2="i * 60"
-                stroke="#eee" stroke-width="1" stroke-dasharray="4,4"
+                class="grid-line"
               />
               <!-- Y轴标签 -->
               <text v-for="(label, i) in yAxisLabels" :key="'ylabel-' + i"
@@ -68,9 +59,7 @@
               <path
                 v-if="chartPath"
                 :d="chartPath"
-                fill="none"
-                stroke="#1890ff"
-                stroke-width="2"
+                class="series-line"
               />
               <!-- 数据区域填充 -->
               <path
@@ -82,8 +71,8 @@
               <!-- 渐变定义 -->
               <defs>
                 <linearGradient id="gradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stop-color="#1890ff" />
-                  <stop offset="100%" stop-color="#fff" />
+                  <stop offset="0%" class="gradient-stop-top" />
+                  <stop offset="100%" class="gradient-stop-bottom" />
                 </linearGradient>
               </defs>
               <!-- 数据点 -->
@@ -93,8 +82,7 @@
                 :cx="point.x"
                 :cy="point.y"
                 r="4"
-                fill="#1890ff"
-                class="data-point"
+                class="series-point"
                 @mouseenter="showTooltip(point, $event)"
                 @mouseleave="hideTooltip"
               />
@@ -107,9 +95,9 @@
         </el-card>
       </el-col>
       <el-col :span="8">
-        <el-card shadow="hover" class="realtime-card-container" style="border-radius: 12px;">
+        <el-card shadow="hover" class="realtime-card-container">
           <template #header>
-            <span style="font-weight: 600; color: #1f2329;">实时数值</span>
+            <span class="card-head-title">实时数值</span>
           </template>
           <div class="realtime-cards">
             <div v-for="tag in availableTags" :key="tag" class="realtime-card">
@@ -134,15 +122,33 @@
         <el-card shadow="hover" class="table-card">
           <template #header>
             <span>历史数据</span>
-            <el-button
-              :icon="Refresh"
-              size="small"
-              @click="fetchHistoryData"
-              :loading="historyLoading"
-              style="float: right;"
-            >刷新</el-button>
+            <span style="float: right;">
+              <template v-if="isSuperAdmin">
+                <el-button
+                  type="danger"
+                  size="small"
+                  :disabled="historySelection.length === 0"
+                  @click="handleDeleteSelected"
+                >删除选中({{ historySelection.length }})</el-button>
+                <el-button
+                  type="danger"
+                  size="small"
+                  plain
+                  :disabled="historyTotal === 0"
+                  @click="handleDeleteAll"
+                >清空全部</el-button>
+              </template>
+              <el-button
+                :icon="Refresh"
+                size="small"
+                @click="fetchHistoryData"
+                :loading="historyLoading"
+              >刷新</el-button>
+            </span>
           </template>
-          <el-table :data="historyData" v-loading="historyLoading" stripe border max-height="400px">
+          <!-- 历史表不使用 v-loading：5s 轮询每次置 loading 会导致蓝色转圈闪烁 -->
+          <el-table :data="historyData" stripe border @selection-change="onHistorySelectionChange">
+            <el-table-column v-if="isSuperAdmin" type="selection" width="42" align="center" />
             <el-table-column prop="id" label="ID" width="80" align="center" />
             <el-table-column prop="msg_id" label="消息ID" width="120" show-overflow-tooltip />
             <el-table-column prop="ts" label="上报时间" width="180" align="center">
@@ -153,14 +159,14 @@
             <el-table-column v-for="tag in availableTags" :key="tag" :label="getTagName(tag)" width="120" align="center">
               <template #default="{ row }">
                 <span v-if="row.data && row.data[tag] !== undefined">{{ row.data[tag] }} {{ getUnit(tag) }}</span>
-                <span v-else style="color: #909399;">-</span>
+                <span v-else class="cell-dash">-</span>
               </template>
             </el-table-column>
           </el-table>
-          <div v-if="historyData.length === 0 && !historyLoading" style="text-align: center; padding: 40px; color: #909399;">
-            暂无数据
+          <div v-if="historyData.length === 0 && !historyLoading" class="empty-tip">
+            {{ historyLoading ? '加载中...' : '暂无数据' }}
           </div>
-          <div v-if="historyTotal > historyPageSize" style="display: flex; justify-content: center; margin-top: 16px;">
+          <div v-if="historyTotal > historyPageSize" class="pager-wrap">
             <el-pagination
               v-model:current-page="historyCurrentPage"
               :page-size="historyPageSize"
@@ -172,31 +178,31 @@
         </el-card>
       </el-col>
       <el-col :span="8">
-        <el-card shadow="hover" class="stat-card" style="margin-bottom: 20px; border-radius: 12px;">
+        <el-card shadow="hover" class="stat-card">
           <template #header>
-            <span style="font-weight: 600; color: #1f2329;">统计信息</span>
+            <span class="card-head-title">统计信息</span>
           </template>
           <el-descriptions :column="1" border>
             <el-descriptions-item label="最大值">
               <span class="stat-highlight">{{ stats.max?.toFixed(2) || '-' }}</span>
-              <span style="color: #8c8c8c; margin-left: 8px;">{{ getUnit(selectedTag) }}</span>
+              <span class="stat-unit">{{ getUnit(selectedTag) }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="最小值">
-              <span class="stat-highlight" style="color: #52c41a;">{{ stats.min?.toFixed(2) || '-' }}</span>
-              <span style="color: #8c8c8c; margin-left: 8px;">{{ getUnit(selectedTag) }}</span>
+              <span class="stat-highlight stat-min">{{ stats.min?.toFixed(2) || '-' }}</span>
+              <span class="stat-unit">{{ getUnit(selectedTag) }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="平均值">
-              <span class="stat-highlight" style="color: #722ed1;">{{ stats.avg?.toFixed(2) || '-' }}</span>
-              <span style="color: #8c8c8c; margin-left: 8px;">{{ getUnit(selectedTag) }}</span>
+              <span class="stat-highlight stat-avg">{{ stats.avg?.toFixed(2) || '-' }}</span>
+              <span class="stat-unit">{{ getUnit(selectedTag) }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="数据点数">
-              <span style="font-size: 16px; font-weight: 600; color: #1f2329;">{{ stats.count || 0 }}</span>
+              <span class="stat-count">{{ stats.count || 0 }}</span>
             </el-descriptions-item>
           </el-descriptions>
         </el-card>
-        <el-card shadow="hover" class="device-info-card" style="border-radius: 12px;">
+        <el-card shadow="hover" class="device-info-card">
           <template #header>
-            <span style="font-weight: 600; color: #1f2329;">设备信息</span>
+            <span class="card-head-title">设备信息</span>
           </template>
           <el-descriptions :column="1" border>
             <el-descriptions-item label="设备状态">
@@ -216,33 +222,58 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { ArrowLeft, Refresh, ArrowUp, ArrowDown } from '@element-plus/icons-vue'
-import { getDeviceData, getDeviceTags, getDevice, type DeviceDataPoint, type DeviceTag, type Device } from '@/api/device'
+import { Refresh, ArrowUp, ArrowDown } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getDeviceData, getDeviceTags, getDevice, deleteDeviceData, type DeviceDataPoint, type DeviceTag, type Device } from '@/api/device'
 import { getProjectTags, type ProjectTag } from '@/api/project'
+import { useAuthStore } from '@/stores/auth'
+import { formatTs as fmtTs, formatTime as fmtTime } from '@/utils/datetime'
 
 const route = useRoute()
 const deviceId = String(route.params.deviceId)
+const authStore = useAuthStore()
+// 数据删除仅对超级管理员开放（与后端路由级 RequireRole 一致）
+const isSuperAdmin = computed(() => authStore.role === 'super_admin')
 
 const dataPoints = ref<DeviceDataPoint[]>([])
 const deviceTags = ref<DeviceTag[]>([])
 const projectTags = ref<ProjectTag[]>([])
+// 从上报数据中实际出现过的标签键（在项目/设备标签未配置时作为兜底，避免硬编码）
+const dataTagKeys = ref<string[]>([])
 const deviceInfo = ref<Device | null>(null)
 const loading = ref(false)
 const autoRefresh = ref(true)
 const timeRange = ref('1h')
 const selectedTag = ref('')
 
-// 根据设备标签生成可用的标签列表，如果没有配置则使用项目标签，再没有则使用默认标签
+// 可选标签：合并设备标签与项目标签（去重），完全动态生成，不做硬编码。
 const availableTags = computed(() => {
-  if (deviceTags.value.length > 0) {
-    // 优先使用设备标签配置
-    return deviceTags.value.map(dt => dt.tag_key)
-  } else if (projectTags.value.length > 0) {
-    // 其次使用项目标签
-    return projectTags.value.map(pt => pt.tag_key)
-  } else {
-    // 最后使用默认标签
-    return ['temperature', 'humidity', 'voltage', 'current']
+  const keys: string[] = []
+  for (const dt of deviceTags.value) {
+    if (dt.tag_key && !keys.includes(dt.tag_key)) keys.push(dt.tag_key)
+  }
+  for (const pt of projectTags.value) {
+    if (pt.tag_key && !keys.includes(pt.tag_key)) keys.push(pt.tag_key)
+  }
+  // 兜底：标签配置里没有，但上报数据里实际出现过的 key
+  for (const k of dataTagKeys.value) {
+    if (!keys.includes(k)) keys.push(k)
+  }
+  return keys
+})
+
+// 按时间升序排列的数据点（用于绘图，后端返回为 ts desc）
+const orderedPoints = computed(() =>
+  [...dataPoints.value].sort((a, b) => a.ts - b.ts)
+)
+
+// 时间范围（毫秒）
+const rangeMs = computed(() => {
+  switch (timeRange.value) {
+    case '6h': return 6 * 60 * 60 * 1000
+    case '24h': return 24 * 60 * 60 * 1000
+    case '1h':
+    default: return 60 * 60 * 1000
   }
 })
 
@@ -310,45 +341,31 @@ const stats = ref({
 let timer: ReturnType<typeof setInterval> | null = null
 
 function getUnit(tag: string): string {
-  // 优先从项目标签获取单位
+  // 优先项目标签，其次设备标签；查不到返回空（不再硬编码单位）
   const pt = projectTags.value.find(p => p.tag_key === tag)
   if (pt && pt.unit) {
     return pt.unit
   }
-  // 使用默认单位映射
-  const units: Record<string, string> = {
-    temperature: '°C',
-    humidity: '%',
-    voltage: 'V',
-    current: 'A'
-  }
-  return units[tag] || ''
+  const dt = deviceTags.value.find(d => d.tag_key === tag)
+  return dt?.unit || ''
 }
 
 function getTagName(tag: string): string {
-  // 优先从项目标签获取名称
+  // 优先项目标签 tag_name，其次设备标签 name；都没有则回退英文 tag_key
   const pt = projectTags.value.find(p => p.tag_key === tag)
   if (pt && pt.tag_name) {
     return pt.tag_name
   }
-  // 使用默认名称映射
-  const names: Record<string, string> = {
-    temperature: '温度',
-    humidity: '湿度',
-    voltage: '电压',
-    current: '电流'
-  }
-  return names[tag] || tag
+  const dt = deviceTags.value.find(d => d.tag_key === tag)
+  return dt?.name || tag
 }
 
 function formatTs(ts: number): string {
-  const d = new Date(ts * 1000)
-  return d.toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return fmtTime(ts)
 }
 
 function formatDate(ts: number): string {
-  const d = new Date(ts * 1000)
-  return d.toLocaleString('zh-CN')
+  return fmtTs(ts)
 }
 
 async function fetchTags() {
@@ -382,8 +399,16 @@ async function fetchTags() {
 async function fetchData() {
   loading.value = true
   try {
-    const res = await getDeviceData(deviceId, 100, 0)
+    const start = Date.now() - rangeMs.value
+    const res = await getDeviceData(deviceId, { start, limit: 500, offset: 0 })
     dataPoints.value = res.data?.list || []
+    // 从实际上报数据里收集出现过的标签键作为动态兜底
+    const keys = new Set<string>(dataTagKeys.value)
+    for (const p of dataPoints.value) {
+      const obj = typeof p.data === 'string' ? JSON.parse(p.data) : p.data
+      Object.keys(obj || {}).forEach(k => keys.add(k))
+    }
+    dataTagKeys.value = Array.from(keys)
     calculateStats()
   } catch {
   } finally {
@@ -406,7 +431,7 @@ function calculateStats() {
 }
 
 function getSelectedTagValues(): number[] {
-  return dataPoints.value
+  return orderedPoints.value
     .map(p => {
       const data = typeof p.data === 'string' ? JSON.parse(p.data) : p.data
       return data[selectedTag.value]
@@ -422,20 +447,21 @@ const chartPoints = computed(() => {
   const max = Math.max(...values)
   const range = max - min || 1
   
-  return dataPoints.value
+  const pts = orderedPoints.value
+  return pts
     .map((p, index) => {
       const data = typeof p.data === 'string' ? JSON.parse(p.data) : p.data
       const value = data[selectedTag.value]
       if (typeof value !== 'number') return null
       
       return {
-        x: 60 + (index / (dataPoints.value.length - 1)) * 740,
+        x: 60 + (pts.length > 1 ? (index / (pts.length - 1)) * 740 : 0),
         y: 240 - ((value - min) / range) * 200,
         value,
         ts: p.ts
       }
     })
-    .filter(p => p !== null)
+    .filter((p): p is { x: number; y: number; value: number; ts: number } => p !== null)
 })
 
 const chartPath = computed(() => {
@@ -470,11 +496,12 @@ const yAxisLabels = computed(() => {
 })
 
 const xAxisLabels = computed(() => {
-  if (dataPoints.value.length === 0) return []
+  if (orderedPoints.value.length === 0) return []
   
-  const step = Math.max(1, Math.floor(dataPoints.value.length / 5))
-  return dataPoints.value
-    .filter((_, i) => i % step === 0 || i === dataPoints.value.length - 1)
+  const pts = orderedPoints.value
+  const step = Math.max(1, Math.floor(pts.length / 5))
+  return pts
+    .filter((_, i) => i % step === 0 || i === pts.length - 1)
     .map(p => formatTs(p.ts))
 })
 
@@ -482,7 +509,7 @@ const realtimeValues = ref<Record<string, number>>({})
 const prevValues = ref<Record<string, number>>({})
 
 function getRealtimeValue(tag: string): string {
-  const values = dataPoints.value
+  const values = orderedPoints.value
     .map(p => {
       const data = typeof p.data === 'string' ? JSON.parse(p.data) : p.data
       return data[tag]
@@ -557,15 +584,14 @@ const historyPageSize = 20
 const historyLoading = ref(false)
 
 function formatHistoryTs(ts: number): string {
-  const d = new Date(ts * 1000)
-  return d.toLocaleString('zh-CN')
+  return fmtTs(ts)
 }
 
 async function fetchHistoryData() {
   historyLoading.value = true
   try {
     const offset = (historyCurrentPage.value - 1) * historyPageSize
-    const res = await getDeviceData(deviceId, historyPageSize, offset)
+    const res = await getDeviceData(deviceId, { limit: historyPageSize, offset })
     historyData.value = res.data?.list || []
     historyTotal.value = res.data?.total || 0
   } catch {
@@ -577,6 +603,58 @@ async function fetchHistoryData() {
 function handleHistoryPageChange(page: number) {
   historyCurrentPage.value = page
   fetchHistoryData()
+}
+
+// ===== 数据删除（仅超管）=====
+const historySelection = ref<DeviceDataPoint[]>([])
+const deleting = ref(false)
+
+function onHistorySelectionChange(rows: DeviceDataPoint[]) {
+  historySelection.value = rows
+}
+
+async function doDelete(payload: { ids?: number[]; all?: boolean }, tip: string) {
+  deleting.value = true
+  try {
+    const res = await deleteDeviceData(deviceId, payload)
+    ElMessage.success(`已删除 ${res.data?.deleted ?? 0} 条${tip}`)
+    if (historyCurrentPage.value > 1 && historyData.value.length === 0) {
+      historyCurrentPage.value = 1
+    }
+    fetchHistoryData()
+    fetchData()
+  } catch {
+    // 拦截器已提示错误
+  } finally {
+    deleting.value = false
+  }
+}
+
+async function handleDeleteSelected() {
+  const ids = historySelection.value.map(r => r.id)
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 条数据？删除后不可恢复。`, '删除确认', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  await doDelete({ ids }, '')
+}
+
+async function handleDeleteAll() {
+  try {
+    await ElMessageBox.confirm(`确定清空设备 ${deviceId} 的全部 ${historyTotal.value}+ 条数据？此操作不可恢复！`, '清空全部', {
+      type: 'error',
+      confirmButtonText: '全部删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  await doDelete({ all: true }, '')
 }
 
 function stopPolling() {
@@ -598,6 +676,10 @@ watch(selectedTag, () => {
   calculateStats()
 })
 
+watch(timeRange, () => {
+  fetchData()
+})
+
 onMounted(async () => {
   await fetchTags()
   fetchData()
@@ -613,42 +695,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.page-container {
-  padding: 20px;
-  min-height: 100vh;
-  background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
-}
-
-.toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 20px;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
-  margin-bottom: 20px;
-}
-
-.toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.toolbar-left h2 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-  color: #1f2329;
-}
-
-.toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .chart-container {
   position: relative;
   width: 100%;
@@ -662,23 +708,44 @@ onUnmounted(() => {
 
 .axis-label {
   font-size: 11px;
-  fill: #8c8c8c;
+  fill: var(--wd-text-placeholder);
 }
 
-.data-point {
+.grid-line {
+  stroke: var(--wd-border-lighter);
+  stroke-width: 1;
+  stroke-dasharray: 4, 4;
+}
+
+.series-line {
+  fill: none;
+  stroke: var(--wd-primary);
+  stroke-width: 2;
+}
+
+.gradient-stop-top {
+  stop-color: var(--wd-primary);
+}
+
+.gradient-stop-bottom {
+  stop-color: #ffffff;
+}
+
+.series-point {
+  fill: var(--wd-primary);
   cursor: pointer;
   transition: all 0.2s ease;
 }
 
-.data-point:hover {
+.series-point:hover {
   r: 6;
-  filter: drop-shadow(0 0 6px rgba(24, 144, 255, 0.5));
+  filter: drop-shadow(0 0 6px var(--wd-primary-bg, rgba(64, 158, 255, 0.5)));
 }
 
 .tooltip {
   position: fixed;
-  background: linear-gradient(135deg, #1f2329 0%, #303744 100%);
-  color: #fff;
+  background: #23272f;
+  color: #f5f7fa;
   padding: 12px 16px;
   border-radius: 10px;
   font-size: 13px;
@@ -728,21 +795,21 @@ onUnmounted(() => {
 }
 
 .realtime-cards::-webkit-scrollbar-thumb {
-  background: #d9d9d9;
+  background: var(--wd-border);
   border-radius: 2px;
 }
 
 .realtime-cards::-webkit-scrollbar-thumb:hover {
-  background: #bfbfbf;
+  background: var(--wd-text-placeholder);
 }
 
 .realtime-card {
-  background: linear-gradient(145deg, #ffffff 0%, #f8f9fa 100%);
+  background: var(--wd-surface);
   height: 64px;
   padding: 10px 12px;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  border: 1px solid #f0f0f0;
+  border-radius: var(--wd-radius-lg);
+  box-shadow: var(--wd-shadow-sm);
+  border: 1px solid var(--wd-border-lighter);
   transition: all 0.3s ease;
   position: relative;
   overflow: hidden;
@@ -756,12 +823,12 @@ onUnmounted(() => {
   top: 0;
   bottom: 0;
   width: 4px;
-  background: linear-gradient(180deg, #1890ff 0%, #69c0ff 100%);
+  background: linear-gradient(180deg, var(--wd-primary) 0%, var(--wd-primary-light) 100%);
 }
 
 .realtime-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--wd-shadow-md);
 }
 
 .realtime-content {
@@ -779,7 +846,7 @@ onUnmounted(() => {
 .realtime-label {
   grid-area: label;
   font-size: 12px;
-  color: #646a73;
+  color: var(--wd-text-regular);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -790,7 +857,7 @@ onUnmounted(() => {
   grid-area: value;
   font-size: 18px;
   font-weight: 700;
-  color: #1f2329;
+  color: var(--wd-text-primary);
   font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -800,7 +867,7 @@ onUnmounted(() => {
 .realtime-unit {
   grid-area: unit;
   font-size: 12px;
-  color: #8c8c8c;
+  color: var(--wd-text-secondary);
   font-weight: 500;
   white-space: nowrap;
 }
@@ -814,7 +881,7 @@ onUnmounted(() => {
   font-weight: 500;
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--wd-bg);
   width: fit-content;
   max-width: 100%;
   overflow: hidden;
@@ -824,7 +891,7 @@ onUnmounted(() => {
 .realtime-badge {
   font-size: 10px;
   color: #fff;
-  background: linear-gradient(135deg, #52c41a 0%, #389e0d 100%);
+  background: var(--wd-success);
   padding: 2px 6px;
   border-radius: 10px;
   font-weight: 500;
@@ -832,53 +899,87 @@ onUnmounted(() => {
 }
 
 .trend-up {
-  color: #52c41a;
+  color: var(--wd-success);
 }
 
 .trend-down {
-  color: #f56c6c;
+  color: var(--wd-danger);
 }
 
 .trend-neutral {
-  color: #8c8c8c;
+  color: var(--wd-text-secondary);
+}
+
+.card-head-title {
+  font-weight: 600;
+  color: var(--wd-text-primary);
+}
+
+.cell-dash {
+  color: var(--wd-text-secondary);
+}
+
+.pager-wrap {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.stat-unit {
+  color: var(--wd-text-secondary);
+  margin-left: 8px;
+}
+
+.stat-min {
+  color: var(--wd-success);
+}
+
+.stat-avg {
+  color: #722ed1;
+}
+
+.stat-count {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--wd-text-primary);
 }
 
 .stat-highlight {
   font-size: 20px;
   font-weight: 700;
-  color: #1890ff;
+  color: var(--wd-primary);
 }
 
 .table-card {
-  border-radius: 12px;
+  border-radius: var(--wd-radius-lg);
   overflow: hidden;
-  background: #fff;
+  background: var(--wd-surface);
 }
 
 .table-card :deep(.el-card__header) {
-  background: #fff;
-  border-bottom: 1px solid #e8e8e8;
+  background: var(--wd-surface);
+  border-bottom: 1px solid var(--wd-border-lighter);
 }
 
 .table-card :deep(.el-card__body) {
-  background: #fff;
+  background: var(--wd-surface);
 }
 
 .table-card :deep(.el-table) {
   border-radius: 0;
-  background: #fff;
+  background: var(--wd-surface);
 }
 
 .table-card :deep(.el-table th) {
-  background: #fff;
+  background: var(--wd-surface);
   font-weight: 600;
-  color: #434e59;
-  border-bottom: 1px solid #e8e8e8;
+  color: var(--wd-text-regular);
+  border-bottom: 1px solid var(--wd-border-lighter);
 }
 
 .table-card :deep(.el-table td) {
-  background: #fff;
-  border-bottom: 1px solid #f5f5f5;
+  background: var(--wd-surface);
+  border-bottom: 1px solid var(--wd-border-lighter);
 }
 
 .stat-card :deep(.el-card__body) {
@@ -886,12 +987,12 @@ onUnmounted(() => {
 }
 
 .stat-card :deep(.el-descriptions-item__label) {
-  color: #646a73;
+  color: var(--wd-text-regular);
   font-weight: 500;
 }
 
 .stat-card :deep(.el-descriptions-item__content) {
-  color: #1f2329;
+  color: var(--wd-text-primary);
 }
 
 .device-info-card :deep(.el-card__body) {

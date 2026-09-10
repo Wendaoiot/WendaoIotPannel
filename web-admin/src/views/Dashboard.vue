@@ -1,6 +1,5 @@
 <template>
   <div class="page-container">
-    <h2 style="margin-bottom: 20px;">仪表盘</h2>
     <el-row :gutter="20" v-loading="loading">
       <el-col :span="8" v-if="isSuperAdmin">
         <el-card shadow="hover">
@@ -41,7 +40,7 @@
             <div class="stat-icon" style="background: #e6f7ff;"><el-icon :size="28" color="#1890ff"><Connection /></el-icon></div>
             <div class="stat-body">
               <div class="stat-label">在线设备</div>
-              <div class="stat-value" style="color: #52c41a;">{{ stats.online_devices }}</div>
+              <div class="stat-value stat-online">{{ stats.online_devices }}</div>
             </div>
           </div>
         </el-card>
@@ -62,7 +61,7 @@
               <el-progress :percentage="offlinePercent" :color="'#e6a23c'" style="margin-top: 4px;" />
             </div>
           </div>
-          <div v-else style="color: #909399; text-align: center; padding: 20px 0;">暂无设备数据</div>
+          <div v-else class="empty-tip">暂无设备数据</div>
         </el-card>
       </el-col>
       <el-col :span="12">
@@ -83,9 +82,10 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, computed, onMounted, ref } from 'vue'
+import { reactive, computed, onMounted, onUnmounted, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { getDashboardStats, type DashboardStats } from '@/api/dashboard'
+import { useRealtime } from '@/composables/useRealtime'
 
 const authStore = useAuthStore()
 const loading = ref(false)
@@ -109,8 +109,8 @@ const offlinePercent = computed(() => {
   return 100 - onlinePercent.value
 })
 
-onMounted(async () => {
-  loading.value = true
+async function fetchStats(showLoading = false) {
+  if (showLoading) loading.value = true
   try {
     const res = await getDashboardStats()
     if (res.data) {
@@ -120,6 +120,25 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+}
+
+// 设备上下线后防抖重取统计，避免连续事件导致计数漂移
+const { onMessage } = useRealtime()
+let offRealtime: (() => void) | null = null
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
+onMounted(() => {
+  fetchStats(true)
+  offRealtime = onMessage((msg) => {
+    if (msg.type !== 'device_status') return
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => fetchStats(), 1500)
+  })
+})
+
+onUnmounted(() => {
+  offRealtime?.()
+  if (refreshTimer) clearTimeout(refreshTimer)
 })
 </script>
 
@@ -146,13 +165,17 @@ onMounted(async () => {
 
 .stat-label {
   font-size: 13px;
-  color: #909399;
+  color: var(--wd-text-secondary);
   margin-bottom: 4px;
 }
 
 .stat-value {
   font-size: 28px;
   font-weight: 700;
-  color: #303133;
+  color: var(--wd-text-primary);
+}
+
+.stat-online {
+  color: var(--wd-success);
 }
 </style>

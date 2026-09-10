@@ -2,14 +2,12 @@
   <el-container class="layout-container">
     <el-aside width="220px" class="layout-aside">
       <div class="logo">
-        <span style="font-size: 18px; font-weight: bold;">Wendao IoT</span>
+        <span class="logo-text">Wendao IoT</span>
       </div>
       <el-menu
         :default-active="activeMenu"
         router
-        background-color="#304156"
-        text-color="#bfcbd9"
-        active-text-color="#409eff"
+        class="layout-menu"
       >
         <el-menu-item index="/dashboard">
           <el-icon><Odometer /></el-icon>
@@ -49,7 +47,7 @@
     <el-container>
       <el-header class="layout-header">
         <div class="header-left">
-          <span style="color: #303133;">{{ pageTitle }}</span>
+          <span class="header-title">{{ pageTitle }}</span>
         </div>
         <div class="header-right">
           <el-dropdown trigger="click">
@@ -64,7 +62,7 @@
                   <span>角色: {{ authStore.user?.role === 'super_admin' ? '超级管理员' : '租户管理员' }}</span>
                 </el-dropdown-item>
                 <el-dropdown-item divided @click="handleLogout">
-                  <span style="color: #f56c6c;">退出登录</span>
+                  <span class="logout-text">退出登录</span>
                 </el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -80,16 +78,21 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { useRealtime } from '@/composables/useRealtime'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 
 const isSuperAdmin = computed(() => authStore.role === 'super_admin')
+
+const { connect, disconnect } = useRealtime()
+onMounted(connect)
+onUnmounted(disconnect)
 
 const activeMenu = computed(() => {
   const path = route.path
@@ -115,6 +118,7 @@ async function handleLogout() {
     return
   }
   authStore.clearAuth()
+  disconnect()
   router.push('/login')
 }
 </script>
@@ -125,7 +129,7 @@ async function handleLogout() {
 }
 
 .layout-aside {
-  background-color: #304156;
+  background-color: var(--wd-sidebar-bg);
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -135,8 +139,22 @@ async function handleLogout() {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--wd-surface);
+  border-bottom: 1px solid var(--wd-sidebar-border);
+}
+
+.logo-text {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.layout-menu {
+  border-right: none;
+  --el-menu-bg-color: var(--wd-sidebar-bg);
+  --el-menu-text-color: var(--wd-sidebar-text);
+  --el-menu-active-color: var(--wd-sidebar-active);
+  --el-menu-hover-bg-color: rgba(255, 255, 255, 0.06);
 }
 
 .layout-aside .el-menu {
@@ -144,8 +162,8 @@ async function handleLogout() {
 }
 
 .layout-header {
-  background: #fff;
-  border-bottom: 1px solid #e6e6e6;
+  background: var(--wd-surface);
+  border-bottom: 1px solid var(--wd-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -158,6 +176,14 @@ async function handleLogout() {
   font-weight: 500;
 }
 
+.header-title {
+  color: var(--wd-text-primary);
+}
+
+.logout-text {
+  color: var(--wd-danger);
+}
+
 .header-right {
   display: flex;
   align-items: center;
@@ -167,12 +193,13 @@ async function handleLogout() {
   display: flex;
   align-items: center;
   cursor: pointer;
-  color: #606266;
+  color: var(--wd-text-regular);
   font-size: 14px;
 }
 
 .layout-main {
-  background: #f0f2f5;
+  background: var(--wd-bg);
   min-height: calc(100vh - 60px);
+  padding: 0;
 }
 </style>

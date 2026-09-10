@@ -101,10 +101,6 @@ async function handleChangePassword() {
     uni.showToast({ title: '两次密码输入不一致', icon: 'none' })
     return
   }
-  if (newPassword.value.length < 6) {
-    uni.showToast({ title: '新密码至少6位', icon: 'none' })
-    return
-  }
 
   changingPassword.value = true
   try {

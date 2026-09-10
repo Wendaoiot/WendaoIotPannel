@@ -1,11 +1,5 @@
 <template>
   <div class="page-container">
-    <div class="toolbar">
-      <div class="toolbar-left">
-        <h2>用户管理</h2>
-      </div>
-    </div>
-
     <el-card class="table-card">
       <el-table :data="users" v-loading="loading" stripe border>
         <el-table-column prop="id" label="ID" width="80" align="center" />
@@ -67,8 +61,7 @@ const resetForm = reactive({
 })
 const resetRules: FormRules = {
   new_password: [
-    { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 4, message: '密码长度不能少于4位', trigger: 'blur' }
+    { required: true, message: '请输入新密码', trigger: 'blur' }
   ]
 }
 

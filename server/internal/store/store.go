@@ -1,7 +1,9 @@
 package store
 
 import (
+	"errors"
 	"strconv"
+	"strings"
 	"time"
 	"wendaoiotpannel/internal/model"
 
@@ -34,6 +36,9 @@ func (s *Store) AutoMigrate() error {
 		&model.Firmware{},
 		&model.OTATask{},
 		&model.OTALog{},
+		&model.ControlCommand{},
+		&model.DeviceMessage{},
+		&model.DevicePeerAllow{},
 	)
 }
 
@@ -81,8 +86,41 @@ func (s *Store) DeleteAdminUser(id uint) error {
 
 // Tenant
 
+// CreateTenant 创建租户，ID 取最低空闲位：删除后新建可复用低位 ID（如全删后从 1 重新开始）。
 func (s *Store) CreateTenant(t *model.Tenant) error {
-	return s.db.Create(t).Error
+	for attempt := 0; attempt < 3; attempt++ {
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			var ids []uint
+			if err := tx.Unscoped().Model(&model.Tenant{}).Pluck("id", &ids).Error; err != nil {
+				return err
+			}
+			used := make(map[uint]bool, len(ids))
+			for _, id := range ids {
+				used[id] = true
+			}
+			next := uint(1)
+			for used[next] {
+				next++
+			}
+			t.ID = next
+			return tx.Create(t).Error
+		})
+		if err == nil {
+			return nil
+		}
+		// 并发抢占同一最低位：重算后重试
+		if !strings.Contains(err.Error(), "1062") && !strings.Contains(err.Error(), "Duplicate") {
+			return err
+		}
+	}
+	return errors.New("创建租户失败：ID 分配并发冲突，请重试")
+}
+
+// TenantNameExists 检查租户名是否已被活跃租户占用（只看未删行，软删残留不算）。
+func (s *Store) TenantNameExists(name string) (bool, error) {
+	var n int64
+	err := s.db.Model(&model.Tenant{}).Where("name = ?", name).Count(&n).Error
+	return n > 0, err
 }
 
 func (s *Store) ListTenants() ([]model.Tenant, error) {
@@ -106,35 +144,97 @@ func (s *Store) UpdateTenant(id uint, name string) error {
 
 func (s *Store) DeleteTenant(id uint) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		// 物理删除（Unscoped）：租户及子树全部清除，不留软删残留，
+		// 名称与 ID 随之释放（配合 CreateTenant 最低位分配实现复用）。
 		var projectIDs []uint
-		if r := tx.Model(&model.Project{}).Where("tenant_id = ?", id).Pluck("id", &projectIDs); r.Error != nil {
+		if r := tx.Unscoped().Model(&model.Project{}).Where("tenant_id = ?", id).Pluck("id", &projectIDs); r.Error != nil {
 			return r.Error
 		}
 		if len(projectIDs) > 0 {
 			var deviceIDs []string
-			if r := tx.Model(&model.Device{}).Where("project_id IN ?", projectIDs).Pluck("id", &deviceIDs); r.Error != nil {
+			if r := tx.Unscoped().Model(&model.Device{}).Where("project_id IN ?", projectIDs).Pluck("id", &deviceIDs); r.Error != nil {
 				return r.Error
 			}
 			if len(deviceIDs) > 0 {
-				tx.Where("device_id IN ?", deviceIDs).Delete(&model.DeviceTag{})
-				tx.Where("device_id IN ?", deviceIDs).Delete(&model.DeviceData{})
-				tx.Where("device_id IN ?", deviceIDs).Delete(&model.ControlLog{})
-				tx.Where("device_id IN ?", deviceIDs).Delete(&model.OTALog{})
-				tx.Where("project_id IN ?", projectIDs).Delete(&model.Device{})
+				if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.DeviceTag{}); r.Error != nil {
+					return r.Error
+				}
+				if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.DeviceData{}); r.Error != nil {
+					return r.Error
+				}
+				if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.ControlLog{}); r.Error != nil {
+					return r.Error
+				}
+				if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.OTALog{}); r.Error != nil {
+					return r.Error
+				}
+				// 设备间消息：任一端（发/收）命中即清
+				if r := tx.Unscoped().Where("from_device_id IN ? OR to_device_id IN ?", deviceIDs, deviceIDs).Delete(&model.DeviceMessage{}); r.Error != nil {
+					return r.Error
+				}
+				if r := tx.Unscoped().Where("from_device_id IN ? OR to_device_id IN ?", deviceIDs, deviceIDs).Delete(&model.DevicePeerAllow{}); r.Error != nil {
+					return r.Error
+				}
+				if r := tx.Unscoped().Where("id IN ?", deviceIDs).Delete(&model.Device{}); r.Error != nil {
+					return r.Error
+				}
 			}
-			tx.Where("project_id IN ?", projectIDs).Delete(&model.ProjectTag{})
-			tx.Where("target_type = ? AND target_id IN ?", "project", uintsToStrings(projectIDs)).Delete(&model.OTATask{})
-			tx.Where("project_id IN ?", projectIDs).Delete(&model.Project{})
+			// 项目维度子表：自定义控制按钮、项目标签
+			if r := tx.Unscoped().Where("project_id IN ?", projectIDs).Delete(&model.ControlCommand{}); r.Error != nil {
+				return r.Error
+			}
+			if r := tx.Unscoped().Where("project_id IN ?", projectIDs).Delete(&model.ProjectTag{}); r.Error != nil {
+				return r.Error
+			}
+			if r := tx.Unscoped().Where("target_type = ? AND target_id IN ?", "project", uintsToStrings(projectIDs)).Delete(&model.OTATask{}); r.Error != nil {
+				return r.Error
+			}
+			// 删除项目：条件必须是主键 id IN ?（此前误写 project_id IN ? 导致 1054 未知列错误被静默吞掉，项目全部残留）
+			if r := tx.Unscoped().Where("id IN ?", projectIDs).Delete(&model.Project{}); r.Error != nil {
+				return r.Error
+			}
 		}
-		tx.Where("tenant_id = ?", id).Delete(&model.AdminUser{})
-		return tx.Delete(&model.Tenant{}, id).Error
+		if r := tx.Unscoped().Where("tenant_id = ?", id).Delete(&model.AdminUser{}); r.Error != nil {
+			return r.Error
+		}
+		if r := tx.Unscoped().Delete(&model.Tenant{}, id); r.Error != nil {
+			return r.Error
+		}
+		return nil
 	})
 }
 
 // Project
 
+// CreateProject 创建项目，ID 取最低空闲位（与 CreateTenant 同策略）：
+// 删除项目后新建可复用低位 ID（如全删后从 1 重新开始）。并发抢占同一最低位时重试。
 func (s *Store) CreateProject(p *model.Project) error {
-	return s.db.Create(p).Error
+	for attempt := 0; attempt < 3; attempt++ {
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			var ids []uint
+			if err := tx.Unscoped().Model(&model.Project{}).Pluck("id", &ids).Error; err != nil {
+				return err
+			}
+			used := make(map[uint]bool, len(ids))
+			for _, id := range ids {
+				used[id] = true
+			}
+			next := uint(1)
+			for used[next] {
+				next++
+			}
+			p.ID = next
+			return tx.Create(p).Error
+		})
+		if err == nil {
+			return nil
+		}
+		// 并发抢占同一最低位：重算后重试
+		if !strings.Contains(err.Error(), "1062") && !strings.Contains(err.Error(), "Duplicate") {
+			return err
+		}
+	}
+	return errors.New("创建项目失败：ID 分配并发冲突，请重试")
 }
 
 func (s *Store) GetProjectByID(id uint) (*model.Project, error) {
@@ -165,19 +265,44 @@ func (s *Store) UpdateProject(id uint, name string) error {
 func (s *Store) DeleteProject(id uint) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		var deviceIDs []string
-		if r := tx.Model(&model.Device{}).Where("project_id = ?", id).Pluck("id", &deviceIDs); r.Error != nil {
+		if r := tx.Unscoped().Model(&model.Device{}).Where("project_id = ?", id).Pluck("id", &deviceIDs); r.Error != nil {
 			return r.Error
 		}
 		if len(deviceIDs) > 0 {
-			tx.Where("device_id IN ?", deviceIDs).Delete(&model.DeviceTag{})
-			tx.Where("device_id IN ?", deviceIDs).Delete(&model.DeviceData{})
-			tx.Where("device_id IN ?", deviceIDs).Delete(&model.ControlLog{})
-			tx.Where("device_id IN ?", deviceIDs).Delete(&model.OTALog{})
-			tx.Where("project_id = ?", id).Delete(&model.Device{})
+			if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.DeviceTag{}); r.Error != nil {
+				return r.Error
+			}
+			if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.DeviceData{}); r.Error != nil {
+				return r.Error
+			}
+			if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.ControlLog{}); r.Error != nil {
+				return r.Error
+			}
+			if r := tx.Unscoped().Where("device_id IN ?", deviceIDs).Delete(&model.OTALog{}); r.Error != nil {
+				return r.Error
+			}
+			// 设备间消息：任一端（发/收）命中即清
+			if r := tx.Unscoped().Where("from_device_id IN ? OR to_device_id IN ?", deviceIDs, deviceIDs).Delete(&model.DeviceMessage{}); r.Error != nil {
+				return r.Error
+			}
+			if r := tx.Unscoped().Where("from_device_id IN ? OR to_device_id IN ?", deviceIDs, deviceIDs).Delete(&model.DevicePeerAllow{}); r.Error != nil {
+				return r.Error
+			}
+			if r := tx.Unscoped().Where("id IN ?", deviceIDs).Delete(&model.Device{}); r.Error != nil {
+				return r.Error
+			}
 		}
-		tx.Where("project_id = ?", id).Delete(&model.ProjectTag{})
-		tx.Where("target_type = ? AND target_id = ?", "project", strconv.FormatUint(uint64(id), 10)).Delete(&model.OTATask{})
-		return tx.Delete(&model.Project{}, id).Error
+		// 项目维度子表：自定义控制按钮、项目标签
+		if r := tx.Unscoped().Where("project_id = ?", id).Delete(&model.ControlCommand{}); r.Error != nil {
+			return r.Error
+		}
+		if r := tx.Unscoped().Where("project_id = ?", id).Delete(&model.ProjectTag{}); r.Error != nil {
+			return r.Error
+		}
+		if r := tx.Unscoped().Where("target_type = ? AND target_id = ?", "project", strconv.FormatUint(uint64(id), 10)).Delete(&model.OTATask{}); r.Error != nil {
+			return r.Error
+		}
+		return tx.Unscoped().Delete(&model.Project{}, id).Error
 	})
 }
 
@@ -216,21 +341,50 @@ func (s *Store) UpdateDeviceStatus(deviceID string, status int) error {
 	return s.db.Model(&model.Device{}).Where("id = ?", deviceID).Update("status", status).Error
 }
 
-func (s *Store) UpdateDevice(deviceID string, name string, projectID uint, status int) error {
+// UpdateDevice 更新设备可编辑属性（名称/所属项目/在线判定配置）。
+// 注意：status 为运行时状态（MQTT 事件/超时扫描维护），绝不允许由此接口写入。
+func (s *Store) UpdateDevice(deviceID string, name string, projectID uint, onlineMode string, offlineTimeoutSec int) error {
 	return s.db.Model(&model.Device{}).Where("id = ?", deviceID).Updates(map[string]interface{}{
-		"name":       name,
-		"project_id": projectID,
-		"status":     status,
+		"name":                name,
+		"project_id":          projectID,
+		"online_mode":         onlineMode,
+		"offline_timeout_sec": offlineTimeoutSec,
 	}).Error
 }
 
+// DeleteDevice 物理删除设备及其全部从属数据（Unscoped）。
+// 设备主键即用户填写的字符串 ID，软删除会残留行导致同 ID 重建撞主键 1062，
+// 因此与删租户/项目一致采用物理删除，删除后该 ID 立即可复用。每步均检查错误，杜绝静默吞错。
 func (s *Store) DeleteDevice(deviceID string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		tx.Where("device_id = ?", deviceID).Delete(&model.DeviceTag{})
-		tx.Where("device_id = ?", deviceID).Delete(&model.DeviceData{})
-		tx.Where("device_id = ?", deviceID).Delete(&model.ControlLog{})
-		tx.Where("device_id = ?", deviceID).Delete(&model.OTALog{})
-		return tx.Delete(&model.Device{}, "id = ?", deviceID).Error
+		if r := tx.Unscoped().Where("device_id = ?", deviceID).Delete(&model.DeviceTag{}); r.Error != nil {
+			return r.Error
+		}
+		if r := tx.Unscoped().Where("device_id = ?", deviceID).Delete(&model.DeviceData{}); r.Error != nil {
+			return r.Error
+		}
+		if r := tx.Unscoped().Where("device_id = ?", deviceID).Delete(&model.ControlLog{}); r.Error != nil {
+			return r.Error
+		}
+		if r := tx.Unscoped().Where("device_id = ?", deviceID).Delete(&model.OTALog{}); r.Error != nil {
+			return r.Error
+		}
+		// 设备间消息/授权：任一端（发/收）命中即清
+		if r := tx.Unscoped().Where("from_device_id = ? OR to_device_id = ?", deviceID, deviceID).Delete(&model.DeviceMessage{}); r.Error != nil {
+			return r.Error
+		}
+		if r := tx.Unscoped().Where("from_device_id = ? OR to_device_id = ?", deviceID, deviceID).Delete(&model.DevicePeerAllow{}); r.Error != nil {
+			return r.Error
+		}
+		// 设备维度的自定义控制指令（device_id 留空的项目通用指令不在此列）
+		if r := tx.Unscoped().Where("device_id = ?", deviceID).Delete(&model.ControlCommand{}); r.Error != nil {
+			return r.Error
+		}
+		// 设备维度的 OTA 任务
+		if r := tx.Unscoped().Where("target_type = ? AND target_id = ?", "device", deviceID).Delete(&model.OTATask{}); r.Error != nil {
+			return r.Error
+		}
+		return tx.Unscoped().Delete(&model.Device{}, "id = ?", deviceID).Error
 	})
 }
 
@@ -465,11 +619,45 @@ func uintsToStrings(ids []uint) []string {
 	return result
 }
 
-// MarkOfflineDevices marks devices as offline if they haven't been active for the specified duration
+// MarkOfflineDevices 离线回收扫描（设备级在线判定感知）。
+// 有效模式 = COALESCE(NULLIF(online_mode, ”), 'connection')：历史空串一律按默认 connection 处理。
+//   - report：超过有效超时未上报(last_active 陈旧)即判离线；
+//   - ping ：超过有效超时未回应 ping(last_active 陈旧)即判离线（连接假死也能检出）；
+//   - connection：纯事件驱动（断开即离线），扫描不触碰。
+//
+// 有效超时 = 设备 offline_timeout_sec(>0) 优先，否则全局 timeout（全局<=0 视为禁用超时，不回收）。
 func (s *Store) MarkOfflineDevices(timeout time.Duration) error {
-	return s.db.Model(&model.Device{}).
-		Where("status = ? AND last_active < ?", model.DeviceStatusOnline, time.Now().Add(-timeout)).
-		Update("status", model.DeviceStatusOffline).Error
+	now := time.Now()
+	effMode := "COALESCE(NULLIF(online_mode, ''), 'connection')"
+
+	// ① 自定义超时的 report/ping 设备：按各自 offline_timeout_sec 回收
+	if err := s.db.Model(&model.Device{}).
+		Where("status = ? AND "+effMode+" IN ('report','ping') AND offline_timeout_sec > 0 AND last_active < DATE_SUB(?, INTERVAL offline_timeout_sec SECOND)",
+			model.DeviceStatusOnline, now).
+		Update("status", model.DeviceStatusOffline).Error; err != nil {
+		return err
+	}
+
+	// ② 未自定义超时的 report/ping 设备：沿用全局超时（全局禁用超时时跳过）
+	if timeout > 0 {
+		if err := s.db.Model(&model.Device{}).
+			Where("status = ? AND "+effMode+" IN ('report','ping') AND offline_timeout_sec <= 0 AND last_active < ?",
+				model.DeviceStatusOnline, now.Add(-timeout)).
+			Update("status", model.DeviceStatusOffline).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListPingModeDevices 返回有效判定模式为 ping 且已启用的设备 ID 列表（平台探活发送目标）。
+// 包含当前离线设备：ping 到达且设备应答后可经 handlePingAck 恢复在线。
+func (s *Store) ListPingModeDevices() ([]string, error) {
+	var ids []string
+	err := s.db.Model(&model.Device{}).
+		Where("enabled = ? AND COALESCE(NULLIF(online_mode, ''), 'connection') = ?", true, "ping").
+		Pluck("id", &ids).Error
+	return ids, err
 }
 
 // UpdateDeviceLastActive updates the device's last active time

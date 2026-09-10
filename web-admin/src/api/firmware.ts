@@ -1,4 +1,5 @@
 import http from './index'
+import { downloadGet } from '@/utils/download'
 
 export interface Firmware {
   id: number
@@ -36,9 +37,19 @@ export interface ControlLog {
   device_id: string
   msg_id: string
   tags: Record<string, unknown>
-  ack_code: number
+  ack_code: number | null
   ack_msg: string
+  status?: 'pending' | 'delivered' | 'success' | 'failed' | 'timeout' | string
   created_at: string
+}
+
+export interface ControlLogQuery {
+  device_id?: string
+  start?: number
+  end?: number
+  status?: string
+  limit?: number
+  offset?: number
 }
 
 export function getFirmwares(): Promise<{ code: number; msg: string; data: Firmware[] }> {
@@ -76,8 +87,24 @@ export function getOTALogs(taskId: number): Promise<{ code: number; msg: string;
   return http.get('/ota/logs', { params: { task_id: taskId } })
 }
 
-export function getControlLogs(deviceId?: string, limit: number = 50, offset: number = 0): Promise<{ code: number; msg: string; data: { list: ControlLog[]; total: number } }> {
-  const params: Record<string, unknown> = { limit, offset }
-  if (deviceId) params.device_id = deviceId
+export function getControlLogs(query: ControlLogQuery = {}): Promise<{ code: number; msg: string; data: { list: ControlLog[]; total: number } }> {
+  const params: Record<string, unknown> = {
+    limit: query.limit ?? 50,
+    offset: query.offset ?? 0
+  }
+  if (query.device_id) params.device_id = query.device_id
+  if (query.start !== undefined) params.start = query.start
+  if (query.end !== undefined) params.end = query.end
+  if (query.status) params.status = query.status
   return http.get('/control-logs', { params })
+}
+
+// 导出控制日志 CSV（携带 JWT，Blob 下载）；status 过滤在前端完成（后端按时间/设备导出全量）
+export function exportControlLogsCsv(query: ControlLogQuery = {}): Promise<void> {
+  const params: Record<string, unknown> = { export: 'csv' }
+  if (query.device_id) params.device_id = query.device_id
+  if (query.start !== undefined) params.start = query.start
+  if (query.end !== undefined) params.end = query.end
+  if (query.limit !== undefined) params.limit = query.limit
+  return downloadGet('/control-logs', params, 'control_logs.csv')
 }

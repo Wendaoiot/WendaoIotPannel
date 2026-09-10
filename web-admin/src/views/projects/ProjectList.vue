@@ -2,7 +2,6 @@
   <div class="page-container">
     <div class="toolbar">
       <div class="toolbar-left">
-        <h2>项目管理</h2>
         <el-select
           v-if="!isTenantAdmin"
           v-model="filterTenantId"

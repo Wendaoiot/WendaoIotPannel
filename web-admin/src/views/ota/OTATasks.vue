@@ -1,7 +1,6 @@
 <template>
   <div class="page-container">
     <div class="toolbar">
-      <div class="toolbar-left"><h2>OTA 升级</h2></div>
       <div class="toolbar-right">
         <el-button type="primary" @click="showTaskDialog">
           <el-icon><Upload /></el-icon>创建升级任务

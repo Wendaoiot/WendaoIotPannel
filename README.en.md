@@ -27,7 +27,6 @@ wendaoiotpannel/
 │   └── 780epm_common/
 │       ├── core/        # Official Hezhou Firmware .soc (Required for demo flashing, included)
 │       └── project/     # 5 Customer Demos (0-5V/4-20mA/panel/rs485/ttl) + Internal Templates
-├── tools/simulator/     # Device MQTT Simulator (Go)
 ├── dev.ps1              # Windows One-Click Startup Script
 ├── 提示词.md            # System Design / MQTT Protocol Specification
 └── 测试清单.md          # Integration Testing Steps
@@ -91,15 +90,8 @@ Open http://localhost:3001?project_id=1
 
 (Online access URLs are in the "Online Platform" link at the top)
 
-### 6. (Optional) Start Device Simulator
-
-```bash
-cd tools/simulator
-# Connect to local broker
-go run . -id ESP32-001
-# Connect to online platform
-go run . -id ESP32-001 -broker tcp://pannel.wendaoiot.com:1883
-```
+> 💡 For device-side simulation/testing, use MQTTX to connect to the broker and publish
+> manually, or refer to the Air780EPM reference firmware under `hardware/` for real-device verification.
 
 ## Default Accounts
 

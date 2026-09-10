@@ -1,9 +1,6 @@
 <template>
   <div class="page-container">
     <div class="toolbar">
-      <div class="toolbar-left">
-        <h2>租户管理</h2>
-      </div>
       <div class="toolbar-right">
         <el-button type="primary" @click="showCreateDialog">
           <el-icon><Plus /></el-icon>
@@ -30,6 +27,9 @@
       <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="80px">
         <el-form-item label="租户名称" prop="name">
           <el-input v-model="createForm.name" placeholder="请输入租户名称" />
+        </el-form-item>
+        <el-form-item label="管理员账号">
+          <el-input v-model="createForm.admin_username" placeholder="可选，默认 租户名_admin" />
         </el-form-item>
         <el-form-item label="管理员密码">
           <el-input v-model="createForm.admin_pwd" type="password" placeholder="可选，默认自动生成" show-password />
@@ -68,6 +68,7 @@ const createDialogVisible = ref(false)
 const createFormRef = ref<FormInstance>()
 const createForm = reactive({
   name: '',
+  admin_username: '',
   admin_pwd: ''
 })
 const createRules: FormRules = {
@@ -101,6 +102,7 @@ function showCreateDialog() {
 
 function resetCreateForm() {
   createForm.name = ''
+  createForm.admin_username = ''
   createForm.admin_pwd = ''
   createFormRef.value?.resetFields()
 }
@@ -111,12 +113,12 @@ async function handleCreate() {
 
   submitting.value = true
   try {
-    const res = await createTenant(createForm.name, createForm.admin_pwd || undefined)
+    const res = await createTenant(createForm.name, createForm.admin_pwd || undefined, createForm.admin_username || undefined)
     ElMessage.success('租户创建成功')
     createDialogVisible.value = false
     if (res.data?.admin_user || res.data?.admin_pwd) {
       ElMessageBox.alert(
-        `管理员账号: ${res.data.admin_user || '-'}\n管理员密码: ${res.data.admin_pwd || '-'}`,
+        `管理员账号: ${res.data.admin_user || '-'}\n管理员密码: ${res.data.admin_pwd || '-'}\n${(res.data as unknown as Record<string, unknown>).generated ? '（密码为随机生成，仅显示一次）' : ''}`,
         '管理员凭证',
         { confirmButtonText: '我已记录', type: 'info' }
       )

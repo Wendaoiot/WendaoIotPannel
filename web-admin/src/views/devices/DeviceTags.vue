@@ -1,30 +1,27 @@
 <template>
-  <div class="page-container">
-    <div class="toolbar">
-      <div class="toolbar-left">
-        <el-button @click="$router.back()">
-          <el-icon><ArrowLeft /></el-icon>
-          返回
-        </el-button>
-        <h2>设备标签配置 - {{ deviceId }}</h2>
-      </div>
-      <div class="toolbar-right">
-        <el-button type="success" @click="goToChart">
-          <el-icon><PieChart /></el-icon>
-          数据图表
-        </el-button>
-        <el-button type="primary" @click="showAddDialog">
-          <el-icon><Plus /></el-icon>
-          添加标签配置
-        </el-button>
-      </div>
+  <div class="tab-pane">
+    <div class="tab-toolbar">
+      <el-button type="success" @click="goToChart">
+        <el-icon><PieChart /></el-icon>
+        数据图表
+      </el-button>
+      <el-button type="primary" @click="showAddDialog">
+        <el-icon><Plus /></el-icon>
+        添加标签配置
+      </el-button>
     </div>
 
     <el-card class="table-card">
       <el-table :data="tags" v-loading="loading" stripe border>
         <el-table-column prop="id" label="ID" width="80" align="center" />
-        <el-table-column prop="tag_key" label="标签键" width="160" />
-        <el-table-column prop="interface" label="接口" width="120" />
+        <el-table-column prop="tag_key" label="标签键" width="140" />
+        <el-table-column prop="name" label="备注名" width="140">
+          <template #default="{ row }">{{ row.name || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="unit" label="单位" width="80">
+          <template #default="{ row }">{{ row.unit || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="interface" label="接口" width="110" />
         <el-table-column prop="formula" label="公式/配置" />
         <el-table-column label="操作" width="120" align="center" fixed="right">
           <template #default="{ row }">
@@ -38,6 +35,12 @@
       <el-form ref="formRef" :model="form" :rules="rules" label-width="80px">
         <el-form-item label="标签键" prop="tag_key">
           <el-input v-model="form.tag_key" placeholder="例如: temperature" />
+        </el-form-item>
+        <el-form-item label="备注名">
+          <el-input v-model="form.name" placeholder="显示名称，例如: 温度（选填）" />
+        </el-form-item>
+        <el-form-item label="单位">
+          <el-input v-model="form.unit" placeholder="例如: °C、V（选填）" />
         </el-form-item>
         <el-form-item label="接口" prop="interface">
           <el-input v-model="form.interface" placeholder="例如: modbus/rtu, sensor/analog" />
@@ -58,7 +61,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { ArrowLeft, Plus, PieChart } from '@element-plus/icons-vue'
+import { Plus, PieChart } from '@element-plus/icons-vue'
 import { getDeviceTags, addDeviceTag, removeDeviceTag, type DeviceTag } from '@/api/device'
 
 const route = useRoute()
@@ -73,6 +76,8 @@ const formRef = ref<FormInstance>()
 
 const form = reactive({
   tag_key: '',
+  name: '',
+  unit: '',
   interface: '',
   formula: ''
 })
@@ -103,6 +108,8 @@ function showAddDialog() {
 
 function resetForm() {
   form.tag_key = ''
+  form.name = ''
+  form.unit = ''
   form.interface = ''
   form.formula = ''
   formRef.value?.resetFields()
@@ -116,6 +123,8 @@ async function handleAdd() {
   try {
     await addDeviceTag(deviceId, {
       tag_key: form.tag_key,
+      name: form.name,
+      unit: form.unit,
       interface: form.interface,
       formula: form.formula
     })

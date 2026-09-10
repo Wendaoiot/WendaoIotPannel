@@ -39,6 +39,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { deviceApi, type Device } from '@/api/index'
+import { isLoggedIn } from '@/utils/auth'
 
 const projectId = ref('')
 const devices = ref<Device[]>([])
@@ -46,6 +47,11 @@ const loading = ref(true)
 const refreshing = ref(false)
 
 onMounted(() => {
+  if (!isLoggedIn()) {
+    uni.redirectTo({ url: '/pages/login/index' })
+    return
+  }
+
   const pages = getCurrentPages()
   const currentPage = pages[pages.length - 1] as any
   const options = currentPage.$page?.options || {}

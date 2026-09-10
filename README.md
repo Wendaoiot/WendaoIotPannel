@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="./README.en.md"><b>English</b></a> &nbsp;|&nbsp; <b>简体中文</b>
+  <a href="./README.en.md"><b>English</b></a>  |  <b>简体中文</b>
 </p>
 
 # WendaoIotPannel
@@ -8,7 +8,7 @@ WendaoIotPannel 是一个开源的通用物联网系统 SAAS 平台，提供完�
 
 这个平台由 Wendaoiot（闻道物联）研发，已被用于智慧水务、智慧农业、智慧养殖、智慧城市等多个行业的生产环境。
 
-- 设备端走标准 MQTT 协议接入，不限定设备型号（设备ID 可为模组 IMEI、MAC、SN 等）；合宙 Air780EPM（LuatOS）是已适配型号之一，参考固件见 `hardware/`。后端 Go + 前端 Vue3/uni-app。
+- 设备端走标准 MQTT 协议接入；合宙 Air780EPM（LuatOS）是已适配型号之一，参考固件见 `hardware/`。后端 Go + 前端 Vue3/uni-app。
 - 线上平台：[http://pannel.wendaoiot.com/iot](http://pannel.wendaoiot.com/iot) ｜ 健康检查：[http://pannel.wendaoiot.com/api/v1/health](http://pannel.wendaoiot.com/api/v1/health)
 - 代码仓库：
   - Gitee：[https://gitee.com/wendaoiot/WendaoIotPannel](https://gitee.com/wendaoiot/WendaoIotPannel)
@@ -27,7 +27,6 @@ wendaoiotpannel/
 │   └── 780epm_common/
 │       ├── core/        # 合宙官方固件 .soc（烧录 demo 必需，已入库）
 │       └── project/     # 5 个客户 demo（0-5V/4-20mA/panel/rs485/ttl）+ 内部模板
-├── tools/simulator/     # 设备 MQTT 模拟器（Go）
 ├── dev.ps1              # Windows 一键启动脚本
 ├── 提示词.md            # 系统设计 / MQTT 协议说明
 └── 测试清单.md          # 联调测试步骤
@@ -91,15 +90,8 @@ npm run dev:h5
 
 （线上访问地址见顶部「线上平台」链接）
 
-### 6. (可选) 启动设备模拟器
-
-```bash
-cd tools/simulator
-# 连本地 broker
-go run . -id ESP32-001
-# 连线上平台
-go run . -id ESP32-001 -broker tcp://pannel.wendaoiot.com:1883
-```
+> 💡 设备端模拟/联调可使用 MQTTX 连接 broker 手动上报，或参考 `hardware/` 下
+> Air780EPM 参考固件直接在真机上验证。
 
 ## 默认账号
 
@@ -153,6 +145,5 @@ go run . -id ESP32-001 -broker tcp://pannel.wendaoiot.com:1883
 ## 联系我们
 
 加好友进微信群（备注 WendaoIotPannel）：
-
 
 ![微信加好友](./微信加好友.png)

@@ -17,6 +17,10 @@ http.interceptors.request.use(config => {
 })
 
 http.interceptors.response.use(response => {
+  // 文件下载（blob）不经过统一的 {code,msg,data} 包装，直接返回完整 response
+  if (response.config.responseType === 'blob' || response.data instanceof Blob) {
+    return response
+  }
   const res = response.data
   if (res.code !== 0) {
     ElMessage.error(res.msg || '请求失败')
@@ -29,14 +33,29 @@ http.interceptors.response.use(response => {
     if (status === 401) {
       localStorage.removeItem('token')
       localStorage.removeItem('user')
-      window.location.href = '/login'
+      // 应用 base 为 /iot/，跳转需带上前缀
+      window.location.href = '/iot/login'
       ElMessage.error('登录已过期，请重新登录')
     } else if (status === 403) {
       ElMessage.error('没有权限执行此操作')
     } else if (status === 500) {
       ElMessage.error('服务器内部错误')
     } else {
-      ElMessage.error(error.response.data?.msg || '请求失败')
+      // 导出接口失败时错误体可能是 Blob（responseType=blob），尝试读出后端 msg
+      if (error.response.data instanceof Blob) {
+        error.response.data.text().then((text: string) => {
+          let msg = '请求失败'
+          try {
+            const j = JSON.parse(text)
+            if (j && j.msg) msg = j.msg
+          } catch {
+            // 非 JSON 错误体，使用默认提示
+          }
+          ElMessage.error(msg)
+        }).catch(() => ElMessage.error('请求失败'))
+      } else {
+        ElMessage.error(error.response.data?.msg || '请求失败')
+      }
     }
   } else {
     ElMessage.error('网络错误，请检查网络连接')

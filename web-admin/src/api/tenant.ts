@@ -12,9 +12,14 @@ export function getTenants(): Promise<{ code: number; msg: string; data: Tenant[
   return http.get('/tenants')
 }
 
-export function createTenant(name: string, admin_pwd?: string): Promise<{ code: number; msg: string; data: Tenant }> {
+export function createTenant(
+  name: string,
+  admin_pwd?: string,
+  admin_username?: string
+): Promise<{ code: number; msg: string; data: Tenant }> {
   const data: Record<string, string> = { name }
   if (admin_pwd) data.admin_pwd = admin_pwd
+  if (admin_username) data.admin_username = admin_username
   return http.post('/tenants', data)
 }
 

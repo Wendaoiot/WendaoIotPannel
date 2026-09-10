@@ -1,5 +1,7 @@
 # Go
 server/server.exe
+server/*.exe
+server/*.exe~
 server/vendor/
 
 # Node
@@ -11,23 +13,28 @@ dist/
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 
 # OS
 Thumbs.db
 
-# Build output
-tools/simulator/simulator.exe
+# Tools: entire directory is local-only, not tracked
+tools/local/
+docs/
 
 # Config with secrets
 *.local.yaml
+config.yaml
+config.local.yaml
+tools/local/emqx_api.env
 
 # Firmware / OTA binary artifacts (source only in repo; distributed via Releases)
 *.soc
 *.binpkg
 *.bin
 *.zip
-# 例外：core/ 下合宙官方固件（烧录 demo 必需），仅保留这两个
+# 例外：core/ 下合宙官方固件（烧录 demo 必需）
 !hardware/780epm_common/core/**/*.soc
 
 # Device runtime logs (may contain real IMEI)

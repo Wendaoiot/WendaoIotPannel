@@ -5,7 +5,17 @@ import { getToken } from '@/utils/auth'
 const BASE_URL = '/api/v1'
 // #endif
 // #ifdef MP-WEIXIN
-const BASE_URL = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'}/api/v1`
+// 小程序端必须直连服务器（无代理）：
+// 1. 在 .env / manifest 环境配置中设置 VITE_API_BASE_URL，且必须是 HTTPS 地址（如 https://api.example.com）；
+// 2. 登录微信公众平台「开发管理 - 开发设置 - 服务器域名」，把该域名加入 request 合法域名。
+// 未配置时 BASE_URL 退化为相对路径，小程序请求必然失败，这里给出明确报错便于排查。
+const MP_SERVER_BASE = String(import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+if (!MP_SERVER_BASE) {
+  console.error(
+    '[web-app] 小程序端未配置 VITE_API_BASE_URL，接口不可用。请配置 HTTPS 服务器地址，并在微信小程序后台添加 request 合法域名。'
+  )
+}
+const BASE_URL = `${MP_SERVER_BASE}/api/v1`
 // #endif
 
 interface RequestOptions {
@@ -145,8 +155,29 @@ export interface ProjectTag {
   writable: boolean
 }
 
+/** 控制下发的标签值：标签 key -> 下发值（数值或字符串） */
+export type ControlTagValue = string | number
+
 export interface ControlPayload {
-  tags: Record<string, any>
+  tags: Record<string, ControlTagValue>
+}
+
+/** 控制下发结果：POST /devices/:deviceId/control */
+export interface ControlResult {
+  msg_id: string
+  status: string
+  hint?: string
+}
+
+/** 控制回执状态（与设备 ACK 阶段对齐） */
+export type ControlAckStatus = 'pending' | 'delivered' | 'success' | 'failed' | 'timeout'
+
+/** 控制执行结果查询：GET /devices/:deviceId/control/:msgId */
+export interface ControlStatus {
+  msg_id: string
+  status: ControlAckStatus
+  ack_code?: number
+  ack_msg?: string
 }
 
 export const authApi = {
@@ -185,7 +216,7 @@ export interface DeviceDataItem {
   id: number
   device_id: string
   data: Record<string, any>
-  ts: string
+  ts: number
 }
 
 export interface DeviceDataListResult {
@@ -193,13 +224,21 @@ export interface DeviceDataListResult {
   total: number
 }
 
+export interface DeviceDataQuery {
+  limit?: number
+  offset?: number
+}
+
 export const deviceApi = {
   list: (projectId: number | string) => get<Device[]>('/devices', { project_id: Number(projectId) }),
   getTags: (deviceId: number | string) => get<DeviceTag[]>(`/devices/${deviceId}/tags`),
-  getData: (deviceId: number | string, params?: { limit?: number; offset?: number }) =>
-    get<DeviceDataListResult>(`/devices/${deviceId}/data`, params as Record<string, any>),
+  getData: (deviceId: number | string, params?: DeviceDataQuery) =>
+    get<DeviceDataListResult>(`/devices/${deviceId}/data`, params as Record<string, unknown>),
   getLatestData: (deviceId: number | string) => get<{ list: Record<string, any>[] }>(`/devices/${deviceId}/data`, { limit: 1 }),
-  control: (deviceId: number | string, payload: ControlPayload) => post(`/devices/${deviceId}/control`, payload)
+  control: (deviceId: number | string, payload: ControlPayload) =>
+    post<ControlResult>(`/devices/${deviceId}/control`, payload),
+  getControlStatus: (deviceId: number | string, msgId: string) =>
+    get<ControlStatus>(`/devices/${deviceId}/control/${encodeURIComponent(msgId)}`)
 }
 
 export const userApi = {

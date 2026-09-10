@@ -1,7 +1,6 @@
 <template>
   <div class="page-container">
     <div class="toolbar">
-      <div class="toolbar-left"><h2>固件管理</h2></div>
       <div class="toolbar-right">
         <el-button type="primary" @click="showCreateDialog">
           <el-icon><Plus /></el-icon>上传固件

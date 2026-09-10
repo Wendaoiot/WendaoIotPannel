@@ -6,7 +6,6 @@
           <el-icon><ArrowLeft /></el-icon>
           返回
         </el-button>
-        <h2>项目标签 - {{ projectId }}</h2>
       </div>
       <div class="toolbar-right">
         <el-button type="primary" @click="showAddDialog">

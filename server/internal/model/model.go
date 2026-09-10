@@ -1,18 +1,27 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 type Tenant struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Name      string    `gorm:"type:varchar(100);uniqueIndex" json:"name"`
-	CreatedAt time.Time `json:"created_at"`
+	ID uint `gorm:"primaryKey" json:"id"`
+	// 唯一性为 逻辑名+软删标记 组合：软删行不再阻塞同名新租户（修复 1062 复发）
+	Name      string         `gorm:"type:varchar(100);uniqueIndex:uk_tenant_name_alive" json:"name"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"uniqueIndex:uk_tenant_name_alive" json:"-"`
 }
 
 type Project struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	TenantID  uint      `gorm:"index" json:"tenant_id"`
-	Name      string    `gorm:"type:varchar(100)" json:"name"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        uint           `gorm:"primaryKey" json:"id"`
+	TenantID  uint           `gorm:"index;uniqueIndex:uk_proj_tenant_name" json:"tenant_id"`
+	Name      string         `gorm:"type:varchar(100);uniqueIndex:uk_proj_tenant_name" json:"name"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 const (
@@ -22,19 +31,34 @@ const (
 )
 
 type Device struct {
-	ID         string     `gorm:"primaryKey;type:varchar(100)" json:"id"`
-	ProjectID  uint       `gorm:"index" json:"project_id"`
-	Name       string     `gorm:"type:varchar(100)" json:"name"`
-	Status     int        `gorm:"default:0" json:"status"`
-	FirstTs    int64      `gorm:"default:0" json:"first_ts"`
-	LastActive *time.Time `gorm:"index" json:"last_active"`
-	CreatedAt  time.Time  `json:"created_at"`
+	// COLLATE utf8mb4_bin：设备 ID 严格区分大小写（与 MQTT username/topic/ACL 语义一致）。
+	// 已存在的库需执行 tools/local/mqtt-test/migrate_bin_collation.sql 一次性迁移。
+	ID           string `gorm:"primaryKey;type:varchar(100) COLLATE utf8mb4_bin" json:"id"`
+	ProjectID    uint   `gorm:"index" json:"project_id"`
+	TenantID     uint   `gorm:"index" json:"tenant_id"` // 冗余租户，便于作用域过滤
+	Name         string `gorm:"type:varchar(100)" json:"name"`
+	Status       int    `gorm:"default:0" json:"status"`
+	Enabled      bool   `gorm:"default:true" json:"enabled"` // false 等价于禁用(Inactive)：拒绝上报/控制
+	DeviceSecret string `gorm:"type:varchar(128)" json:"-"`  // 一机一密，接入 EMQX 认证
+	// 设备级在线判定（系统默认 connection；历史空串等同 connection）：
+	//   connection — 按 MQTT 连接/断开事件实时判定
+	//   report     — 按上报超时判定（连接事件仍置在线，超时未上报由扫描回收）
+	//   ping       — 按探活应答超时判定
+	OnlineMode        string         `gorm:"type:varchar(20);default:''" json:"online_mode"`
+	OfflineTimeoutSec int            `gorm:"default:0" json:"offline_timeout_sec"` // 0=沿用全局 offline_timeout_sec
+	FirstTs           int64          `gorm:"default:0" json:"first_ts"`
+	LastActive        *time.Time     `gorm:"index" json:"last_active"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 type DeviceTag struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	DeviceID  string    `gorm:"index;type:varchar(100)" json:"device_id"`
 	TagKey    string    `gorm:"type:varchar(50)" json:"tag_key"`
+	Name      string    `gorm:"type:varchar(100)" json:"name"` // 备注名/显示名（用户可填）
+	Unit      string    `gorm:"type:varchar(20)" json:"unit"`  // 单位
 	Interface string    `gorm:"type:varchar(50)" json:"interface"`
 	Formula   string    `gorm:"type:varchar(500)" json:"formula"`
 	CreatedAt time.Time `json:"created_at"`
@@ -55,7 +79,8 @@ type DeviceData struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	DeviceID  string    `gorm:"index;type:varchar(100)" json:"device_id"`
 	MsgID     string    `gorm:"type:varchar(100)" json:"msg_id"`
-	Ts        int64     `json:"ts"`
+	Ts        int64     `gorm:"index" json:"ts"` // 权威时间戳：服务端接收时间（Unix 毫秒），用于排序/实时/图表
+	DeviceTs  int64     `json:"device_ts"`       // 设备自报时间戳（毫秒），仅参考，不参与排序
 	Version   string    `gorm:"type:varchar(50)" json:"version"`
 	Data      string    `gorm:"type:text" json:"data"`
 	CreatedAt time.Time `json:"created_at"`
@@ -64,11 +89,38 @@ type DeviceData struct {
 type ControlLog struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	DeviceID  string    `gorm:"index;type:varchar(100)" json:"device_id"`
-	MsgID     string    `gorm:"type:varchar(100)" json:"msg_id"`
+	TenantID  uint      `gorm:"index" json:"tenant_id,omitempty"`
+	MsgID     string    `gorm:"index;type:varchar(100)" json:"msg_id"`
 	Tags      string    `gorm:"type:text" json:"tags"`
+	Status    string    `gorm:"type:varchar(20);default:'pending'" json:"status"` // pending/delivered/success/failed/timeout
 	AckCode   *int      `json:"ack_code"`
 	AckMsg    string    `json:"ack_msg"`
 	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// 控制指令状态
+const (
+	ControlStatusPending   = "pending"
+	ControlStatusDelivered = "delivered"
+	ControlStatusSuccess   = "success"
+	ControlStatusFailed    = "failed"
+	ControlStatusTimeout   = "timeout"
+)
+
+// ControlCommand 是用户可自定义命名/取值的控制按钮（项目维度）。
+type ControlCommand struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	ProjectID uint      `gorm:"index" json:"project_id"`
+	DeviceID  string    `gorm:"type:varchar(100)" json:"device_id,omitempty"` // 留空表示项目通用
+	Name      string    `gorm:"type:varchar(100)" json:"name"`                // 按钮显示名（用户命名）
+	TagKey    string    `gorm:"type:varchar(50)" json:"tag_key"`
+	Value     float64   `json:"value"`
+	Icon      string    `gorm:"type:varchar(50)" json:"icon"`
+	Sort      int       `gorm:"default:0" json:"sort"`
+	Danger    bool      `gorm:"default:false" json:"danger"` // 高危指令（重启/出厂），需二次确认
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 const (
@@ -77,12 +129,15 @@ const (
 )
 
 type AdminUser struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Username  string    `gorm:"type:varchar(50);uniqueIndex" json:"username"`
-	Password  string    `gorm:"type:varchar(200)" json:"-"`
-	Role      string    `gorm:"type:varchar(20)" json:"role"`
-	TenantID  *uint     `json:"tenant_id"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	Username      string     `gorm:"type:varchar(50);uniqueIndex" json:"username"`
+	Password      string     `gorm:"type:varchar(200)" json:"-"`
+	Role          string     `gorm:"type:varchar(20)" json:"role"`
+	TenantID      *uint      `json:"tenant_id"`
+	TokenVersion  uint       `gorm:"default:0" json:"-"` // 改密/重置/删除后递增，使旧 token 失效
+	PassChangedAt *time.Time `json:"-"`                  // 可空：未改过密码时为 NULL（MySQL8 严格模式不接受零值日期）
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 type Firmware struct {
@@ -101,6 +156,40 @@ const (
 	OTATaskStatusRunning = "running"
 	OTATaskStatusDone    = "done"
 )
+
+// ===================== 设备间通信（D2D） =====================
+
+// DeviceMessageStatus 设备间消息投递结果
+const (
+	DeviceMsgDelivered        = "delivered"         // 已投递到目标设备 inbox
+	DeviceMsgRecipientOffline = "recipient_offline" // 目标设备离线，拒绝投递
+	DeviceMsgRejected         = "rejected"          // 越权（跨租户且无白名单）
+	DeviceMsgTargetNotFound   = "target_not_found"  // 目标设备不存在或未注册
+)
+
+// DeviceMessage 设备间消息留痕（设备 A → 平台 → 设备 B 的 inbox）。
+type DeviceMessage struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	MsgID        string    `gorm:"type:varchar(100);index" json:"msg_id"`         // 设备上报的消息 id
+	FromDeviceID string    `gorm:"type:varchar(100);index" json:"from_device_id"` // 发送方设备 ID
+	ToDeviceID   string    `gorm:"type:varchar(100);index" json:"to_device_id"`   // 接收方设备 ID
+	TenantID     uint      `gorm:"index" json:"tenant_id"`                        // 发送方所属租户
+	Type         string    `gorm:"type:varchar(50)" json:"type"`                  // 业务类型（notify/cmd/event…）
+	Payload      string    `gorm:"type:text" json:"payload"`                      // JSON 透传内容
+	Status       string    `gorm:"type:varchar(30);index" json:"status"`          // delivered/offline/rejected/not_found
+	Ts           int64     `json:"ts"`                                            // 服务端接收时间（毫秒）
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// DevicePeerAllow 跨租户设备间通信白名单（from → to 单向授权）。
+type DevicePeerAllow struct {
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	FromDeviceID string    `gorm:"type:varchar(100);uniqueIndex:uk_peer_from_to" json:"from_device_id"`
+	ToDeviceID   string    `gorm:"type:varchar(100);uniqueIndex:uk_peer_from_to" json:"to_device_id"`
+	TenantID     uint      `gorm:"index" json:"tenant_id"` // 发起方租户（管理方便）
+	Remark       string    `gorm:"type:varchar(200)" json:"remark"`
+	CreatedAt    time.Time `json:"created_at"`
+}
 
 type OTATask struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`

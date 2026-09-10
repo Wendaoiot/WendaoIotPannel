@@ -49,6 +49,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { deviceApi, type DeviceDataItem } from '@/api/index'
+import { isLoggedIn } from '@/utils/auth'
 
 const deviceId = ref('')
 const dataList = ref<DeviceDataItem[]>([])
@@ -64,6 +65,11 @@ let autoRefreshTimer: number | null = null
 const hasMore = ref(true)
 
 onMounted(() => {
+  if (!isLoggedIn()) {
+    uni.redirectTo({ url: '/pages/login/index' })
+    return
+  }
+
   const pages = getCurrentPages()
   const currentPage = pages[pages.length - 1] as any
   const options = currentPage.$page?.options || {}
@@ -148,7 +154,7 @@ function stopAutoRefresh() {
   }
 }
 
-function formatTime(ts: string): string {
+function formatTime(ts: number): string {
   if (!ts) return '--'
   const d = new Date(ts)
   const y = d.getFullYear()

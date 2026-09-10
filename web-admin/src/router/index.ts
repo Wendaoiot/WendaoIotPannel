@@ -47,28 +47,55 @@ const router = createRouter({
           meta: { title: '设备管理' }
         },
         {
-          path: 'devices/:deviceId/tags',
-          name: 'DeviceTags',
-          component: () => import('@/views/devices/DeviceTags.vue'),
-          meta: { title: '设备标签配置' }
-        },
-        {
-          path: 'devices/:deviceId/data',
-          name: 'DeviceData',
-          component: () => import('@/views/devices/DeviceData.vue'),
-          meta: { title: '设备数据' }
-        },
-        {
-          path: 'devices/:deviceId/chart',
-          name: 'DeviceChart',
-          component: () => import('@/views/devices/DeviceChart.vue'),
-          meta: { title: '数据图表' }
-        },
-        {
-          path: 'devices/:deviceId/control',
-          name: 'DeviceControl',
-          component: () => import('@/views/devices/DeviceControl.vue'),
-          meta: { title: '设备控制' }
+          // 设备中心壳：页头 + Tab 页签；旧子页面路由原地保留为子路由，深链不变
+          path: 'devices/:deviceId',
+          name: 'DeviceDetail',
+          component: () => import('@/views/devices/DeviceDetail.vue'),
+          meta: { title: '设备详情' },
+          children: [
+            {
+              path: '',
+              name: 'DeviceOverview',
+              component: () => import('@/views/devices/DeviceOverview.vue'),
+              meta: { title: '设备详情' }
+            },
+            {
+              path: 'tags',
+              name: 'DeviceTags',
+              component: () => import('@/views/devices/DeviceTags.vue'),
+              meta: { title: '设备标签配置' }
+            },
+            {
+              path: 'data',
+              name: 'DeviceData',
+              component: () => import('@/views/devices/DeviceData.vue'),
+              meta: { title: '设备数据' }
+            },
+            {
+              path: 'chart',
+              name: 'DeviceChart',
+              component: () => import('@/views/devices/DeviceChart.vue'),
+              meta: { title: '数据图表' }
+            },
+            {
+              path: 'control',
+              name: 'DeviceControl',
+              component: () => import('@/views/devices/DeviceControl.vue'),
+              meta: { title: '设备控制' }
+            },
+            {
+              path: 'peer',
+              name: 'DevicePeerMessages',
+              component: () => import('@/views/devices/DevicePeerMessages.vue'),
+              meta: { title: '设备消息' }
+            },
+            {
+              path: 'settings',
+              name: 'DeviceSettings',
+              component: () => import('@/views/devices/DeviceSettings.vue'),
+              meta: { title: '设备设置' }
+            }
+          ]
         },
         {
           path: 'firmwares',
@@ -119,10 +146,16 @@ router.beforeEach((to, _from, next) => {
     return
   }
 
-  const role = authStore.user?.role
-  if (to.meta.roles && role && !(to.meta.roles as string[]).includes(role)) {
-    next('/dashboard')
-    return
+  // 角色受限路由：默认拒绝。
+  // 旧逻辑 `if (to.meta.roles && role && ...)` 在 role 为空（如本地 user 损坏/丢失）
+  // 时会跳过校验导致越权进入超管页面。改为：声明了 roles 的路由，必须具备有效 role 且命中，否则拒绝。
+  const requiredRoles = to.meta.roles as string[] | undefined
+  if (requiredRoles && requiredRoles.length > 0) {
+    const role = authStore.user?.role
+    if (!role || !requiredRoles.includes(role)) {
+      next('/dashboard')
+      return
+    }
   }
 
   next()

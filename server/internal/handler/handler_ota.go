@@ -3,8 +3,9 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"strconv"
-	"time"
 
 	"wendaoiotpannel/internal/model"
 	"wendaoiotpannel/internal/protocol"
@@ -26,6 +27,10 @@ func (h *Handler) CreateFirmware(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, -1, err.Error())
+		return
+	}
+	if !isHTTPSURL(req.URL) {
+		fail(c, http.StatusBadRequest, "固件下载地址必须为 https://")
 		return
 	}
 	fw := &model.Firmware{
@@ -125,12 +130,12 @@ func (h *Handler) createDeviceOTA(deviceID string, fw *model.Firmware) (uint, er
 	}
 
 	msgID := uuid.New().String()
-	log := &model.OTALog{
+	otaLog := &model.OTALog{
 		TaskID:   task.ID,
 		DeviceID: deviceID,
 		Status:   model.OTALogStatusPending,
 	}
-	if err := h.store.CreateOTALog(log); err != nil {
+	if err := h.store.CreateOTALog(otaLog); err != nil {
 	}
 
 	cmd := &protocol.OTARequest{
@@ -143,6 +148,7 @@ func (h *Handler) createDeviceOTA(deviceID string, fw *model.Firmware) (uint, er
 	}
 	payload, _ := json.Marshal(cmd)
 	if err := h.mqtt.PublishRaw(protocol.TopicOTA(deviceID), payload); err != nil {
+		log.Printf("ota: publish to %s error: %v", deviceID, err)
 	}
 	return task.ID, nil
 }
@@ -164,7 +170,7 @@ func (h *Handler) createProjectOTA(projectID uint, fw *model.Firmware) (uint, er
 	}
 
 	for _, d := range devices {
-		if d.Status == model.DeviceStatusInactive {
+		if !d.Enabled {
 			continue
 		}
 		otaLog := &model.OTALog{
@@ -186,17 +192,18 @@ func (h *Handler) createProjectOTA(projectID uint, fw *model.Firmware) (uint, er
 		}
 		payload, _ := json.Marshal(cmd)
 		if err := h.mqtt.PublishRaw(protocol.TopicOTA(d.ID), payload); err != nil {
+			log.Printf("ota: publish to %s error: %v", d.ID, err)
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	return task.ID, nil
 }
 
 func (h *Handler) ListOTATasks(c *gin.Context) {
-	tasks, err := h.store.ListOTATasks()
+	_, tenantID := getAuthInfo(c)
+	tasks, err := h.store.ListOTATasksScoped(tenantID)
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, tasks)
@@ -207,9 +214,21 @@ func (h *Handler) GetOTALogs(c *gin.Context) {
 		TaskID uint `form:"task_id"`
 	}
 	c.ShouldBindQuery(&req)
+	_, tenantID := getAuthInfo(c)
+	if tenantID != nil && req.TaskID > 0 {
+		task, err := h.store.GetOTATaskByID(req.TaskID)
+		if err != nil {
+			fail(c, http.StatusNotFound, "任务不存在")
+			return
+		}
+		if !h.assertOTATaskBelongsToTenant(task, *tenantID) {
+			forbidden(c, "无权查看此任务")
+			return
+		}
+	}
 	logs, err := h.store.ListOTALogs(req.TaskID)
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, logs)
@@ -245,4 +264,21 @@ func (h *Handler) assertDeviceBelongsToTenant(deviceID string, tenantID *uint) b
 		return false
 	}
 	return h.assertProjectBelongsToTenant(dev.ProjectID, tenantID)
+}
+
+// assertOTATaskBelongsToTenant 校验 OTA 任务目标（设备/项目）归属当前租户。
+func (h *Handler) assertOTATaskBelongsToTenant(task *model.OTATask, tenantID uint) bool {
+	if task.TargetType == "device" {
+		dev, err := h.store.GetDevice(task.TargetID)
+		if err != nil {
+			return false
+		}
+		return h.assertProjectBelongsToTenant(dev.ProjectID, &tenantID)
+	}
+	// project
+	pid, err := strconv.ParseUint(task.TargetID, 10, 64)
+	if err != nil {
+		return false
+	}
+	return h.assertProjectBelongsToTenant(uint(pid), &tenantID)
 }

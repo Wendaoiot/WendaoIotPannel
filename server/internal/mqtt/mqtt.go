@@ -2,11 +2,14 @@ package mqtt
 
 import (
 	"encoding/json"
-	"strconv"
+	"fmt"
+	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"wendaoiotpannel/internal/evaluate"
+	"wendaoiotpannel/internal/events"
 	"wendaoiotpannel/internal/model"
 	"wendaoiotpannel/internal/protocol"
 	"wendaoiotpannel/internal/store"
@@ -17,17 +20,27 @@ import (
 type Client struct {
 	client mqtt.Client
 	store  *store.Store
+	bus    *events.Bus
 	cfg    Config
+	emqx   *EMQXAdmin
 	mu     sync.RWMutex
 }
 
-func New(cfg Config, s *store.Store) (*Client, error) {
-	c := &Client{store: s, cfg: cfg}
+// EMQX 5.x 系统事件主题（sys_event_messages 默认开启 connected/disconnected）。
+const (
+	sysTopicClientConnected    = "$SYS/brokers/+/clients/+/connected"
+	sysTopicClientDisconnected = "$SYS/brokers/+/clients/+/disconnected"
+)
+
+func New(cfg Config, s *store.Store, bus *events.Bus) (*Client, error) {
+	c := &Client{store: s, cfg: cfg, bus: bus}
 
 	opts := mqtt.NewClientOptions().
 		AddBroker(cfg.Broker).
 		SetClientID(cfg.ClientID).
 		SetAutoReconnect(true).
+		SetResumeSubs(true).
+		SetCleanSession(false).
 		SetOnConnectHandler(func(_ mqtt.Client) {
 			c.resubscribe()
 		})
@@ -53,20 +66,52 @@ func (c *Client) Subscribe() error {
 	topics := map[string]byte{
 		protocol.TopicDataSub():        1,
 		protocol.TopicControlAckSub():  1,
+		protocol.TopicPingAckSub():     1,
 		protocol.TopicOTAProgressSub(): 1,
 		protocol.TopicOTAAckSub():      1,
+		protocol.TopicPeerSub():        1,
+		// EMQX 系统事件：实时同步设备上下线（connect 即在线，disconnect 即离线）
+		sysTopicClientConnected:    1,
+		sysTopicClientDisconnected: 1,
 	}
 	token := c.client.SubscribeMultiple(topics, c.onMessage)
 	token.Wait()
 	return token.Error()
 }
 
+// SetEMQXAdmin 注入 EMQX REST 客户端（互踢）。配置缺失时传 nil，互踢静默禁用。
+func (c *Client) SetEMQXAdmin(a *EMQXAdmin) {
+	c.emqx = a
+}
+
+// KickDeviceSessions 踢掉某设备当前的全部在线会话（互踢入口，供认证回调调用）。
+func (c *Client) KickDeviceSessions(deviceID string) ([]string, error) {
+	return c.emqx.KickDeviceSessions(deviceID)
+}
+
+// NotifyKicked 主动断开某设备前，向 wendao/{id}/kicked 发布断开原因（QoS1）。
+// 同步等待 broker 确认入队后再返回：调用方随后踢线时，通知已具备投递窗口。
+// QoS1 消息会进入被踢会话的持久化队列，客户端重连（clean session=false）后可收到；
+// clean session=true 的在线会话依赖调用方预留的投递宽限时间，极端情况下仍可能丢失。
+func (c *Client) NotifyKicked(deviceID, reason, msg string) {
+	notice, _ := json.Marshal(protocol.KickedNotice{Reason: reason, Msg: msg, Ts: time.Now().UnixMilli()})
+	token := c.client.Publish(protocol.TopicKicked(deviceID), 1, false, notice)
+	token.Wait()
+	if err := token.Error(); err != nil {
+		log.Printf("mqtt: publish kicked notice to %s failed: %v", deviceID, err)
+	}
+}
+
 func (c *Client) resubscribe() {
 	topics := map[string]byte{
 		protocol.TopicDataSub():        1,
 		protocol.TopicControlAckSub():  1,
+		protocol.TopicPingAckSub():     1,
 		protocol.TopicOTAProgressSub(): 1,
 		protocol.TopicOTAAckSub():      1,
+		protocol.TopicPeerSub():        1,
+		sysTopicClientConnected:        1,
+		sysTopicClientDisconnected:     1,
 	}
 	c.client.SubscribeMultiple(topics, c.onMessage)
 }
@@ -81,22 +126,35 @@ func extractDeviceID(topic string) string {
 
 func (c *Client) onMessage(_ mqtt.Client, msg mqtt.Message) {
 	topic := msg.Topic()
+
+	// EMQX 系统事件：clientid 即设备ID，实时同步在线状态
+	if strings.HasPrefix(topic, "$SYS/brokers/") &&
+		(strings.HasSuffix(topic, "/connected") || strings.HasSuffix(topic, "/disconnected")) {
+		c.handleClientEvent(topic, msg.Payload())
+		return
+	}
+
 	deviceID := extractDeviceID(topic)
 
 	if strings.HasSuffix(topic, "/ota/progress") {
 		c.handleOTAProgress(deviceID, msg.Payload())
 	} else if strings.HasSuffix(topic, "/ota/ack") {
 		c.handleOTAAck(deviceID, msg.Payload())
+	} else if strings.HasSuffix(topic, "/peer") {
+		c.handlePeer(deviceID, msg.Payload())
 	} else if strings.HasSuffix(topic, "/data") {
 		c.handleUplink(deviceID, msg.Payload())
 	} else if strings.HasSuffix(topic, "/control/ack") {
-		c.handleControlAck(msg.Payload())
+		c.handleControlAck(deviceID, msg.Payload())
+	} else if strings.HasSuffix(topic, "/ping/ack") {
+		c.handlePingAck(deviceID, msg.Payload())
 	}
 }
 
 func (c *Client) handleUplink(deviceID string, payload []byte) {
 	var req protocol.UplinkRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("mqtt uplink: invalid JSON from %s: %v (payload: %.200s)", deviceID, err, payload)
 		return
 	}
 
@@ -111,19 +169,31 @@ func (c *Client) handleUplink(deviceID string, payload []byte) {
 		return
 	}
 
-	if dev.Status == model.DeviceStatusInactive {
+	if !dev.Enabled {
 		resp.Code = protocol.CodeDeviceNotRegistered
-		resp.Msg = "device inactive"
+		resp.Msg = "device disabled"
 		c.publishAck(protocol.TopicDataAck(deviceID), resp)
 		return
 	}
 
-	c.store.UpdateDeviceStatus(deviceID, model.DeviceStatusOnline)
-	c.store.UpdateDeviceLastActive(deviceID)
+	// 上线：仅对启用设备刷新状态/活跃时间；回填冗余租户字段。
+	if err := c.store.SetDeviceRuntimeStatus(deviceID, true); err != nil {
+		log.Printf("mqtt uplink: set runtime status error: %v", err)
+	}
+	if dev.TenantID == 0 {
+		if proj, perr := c.store.GetProjectByID(dev.ProjectID); perr == nil {
+			_ = c.store.SetDeviceTenant(deviceID, proj.TenantID)
+			dev.TenantID = proj.TenantID
+		}
+	}
 
 	// Save first boot time (updated on each device reboot)
 	if req.FirstTs > 0 {
-		c.store.UpdateDeviceFirstTs(deviceID, req.FirstTs)
+		// FirstTs 由设备上报，仅在合理范围采信（毫秒/秒归一为毫秒）
+		firstTs := normalizeMillis(req.FirstTs)
+		if err := c.store.UpdateDeviceFirstTs(deviceID, firstTs); err != nil {
+			log.Printf("mqtt uplink: update first_ts error: %v", err)
+		}
 	}
 
 	deviceTags, _ := c.store.ListDeviceTags(deviceID)
@@ -143,32 +213,360 @@ func (c *Client) handleUplink(deviceID string, payload []byte) {
 	}
 
 	dataJSON, _ := json.Marshal(computed)
+	now := time.Now().UnixMilli()
 	dd := &model.DeviceData{
 		DeviceID: deviceID,
 		MsgID:    req.ID,
-		Ts:       req.Ts,
+		Ts:       now,                     // 权威时间：服务端接收时间（毫秒）
+		DeviceTs: normalizeMillis(req.Ts), // 设备自报时间戳仅参考
 		Version:  req.Version,
 		Data:     string(dataJSON),
 	}
 	if err := c.store.SaveDeviceData(dd); err != nil {
+		log.Printf("mqtt uplink: save device data error: %v", err)
 	}
 
 	resp.Code = protocol.CodeSuccess
 	resp.Msg = "ok"
 	c.publishAck(protocol.TopicDataAck(deviceID), resp)
+
+	// 实时推送给前端（按租户）
+	if c.bus != nil && dev.TenantID != 0 {
+		c.bus.BroadcastToTenant(dev.TenantID, events.Message{
+			Type: "device_data",
+			Data: map[string]interface{}{
+				"device_id": deviceID,
+				"ts":        now,
+				"tags":      computed,
+			},
+		})
+	}
 }
 
-func (c *Client) handleControlAck(payload []byte) {
+// handleControlAck 设备控制回执：wendao/{id}/control/ack → 更新控制日志状态机 →
+// 前端 WS 广播 → 向 wendao/{id}/control/ack/resp 发布服务器响应（端侧可订阅确认平台已收到）。
+// 响应码：0=已受理（含重复 ack 幂等）；3=msg id 不存在；非法 JSON 不回（与 data/peer 一致）。
+func (c *Client) handleControlAck(deviceID string, payload []byte) {
 	var ack protocol.DownlinkResponse
 	if err := json.Unmarshal(payload, &ack); err != nil {
+		log.Printf("mqtt control ack: invalid JSON from %s: %v (payload: %.200s)", deviceID, err, payload)
 		return
 	}
-	c.store.UpdateControlLogAck(ack.ID, ack.Code, ack.Msg)
+
+	resp := protocol.DownlinkResponse{ID: ack.ID}
+	if ack.ID == "" {
+		resp.Code, resp.Msg = protocol.CodeParamError, "id required"
+		c.publishAck(protocol.TopicControlAckResp(deviceID), resp)
+		return
+	}
+	if err := c.store.ApplyControlAck(ack.ID, ack.Code, ack.Msg); err != nil {
+		log.Printf("mqtt control ack: apply error: %v", err)
+		resp.Code, resp.Msg = protocol.CodeParamError, "unknown msg id"
+		c.publishAck(protocol.TopicControlAckResp(deviceID), resp)
+		return
+	}
+	resp.Code, resp.Msg = protocol.CodeSuccess, "ok"
+	c.publishAck(protocol.TopicControlAckResp(deviceID), resp)
+
+	clog, err := c.store.GetControlLogByMsgID(ack.ID)
+	if err != nil {
+		return
+	}
+	if c.bus != nil && clog.TenantID != 0 {
+		status := model.ControlStatusSuccess
+		if ack.Code != 0 {
+			status = model.ControlStatusFailed
+		}
+		c.bus.BroadcastToTenant(clog.TenantID, events.Message{
+			Type: "control_ack",
+			Data: map[string]interface{}{
+				"device_id": clog.DeviceID,
+				"msg_id":    ack.ID,
+				"code":      ack.Code,
+				"msg":       ack.Msg,
+				"status":    status,
+			},
+		})
+	}
+}
+
+// normalizeMillis 将设备上报时间戳归一为毫秒：秒级（< 1e12）×1000。
+func normalizeMillis(ts int64) int64 {
+	if ts <= 0 {
+		return 0
+	}
+	if ts < 1_000_000_000_000 {
+		return ts * 1000
+	}
+	return ts
+}
+
+// handlePeer 设备间消息：设备发布 wendao/{from}/peer → 解析目标 → 校验 → 投递目标 inbox →
+// 回汇总 ack → 逐目标留痕。
+//
+// to 目标语义（见 protocol.PeerMessage）：
+//   - 单设备 ID：点对点，唯一支持跨租户白名单（DevicePeerAllow）的模式
+//   - "a,b,c" 多播 / "*" 租户级广播 / "project:{id}" 项目级广播：仅限发送方同租户
+//
+// 授权规则：
+//   - 双方同租户：默认允许
+//   - 跨租户（仅单目标）：必须存在白名单 DevicePeerAllow(from → to)，否则 code=6
+//
+// 结果码：0=全部/部分投递成功（msg 带 "delivered 成功数/总数"）；5=目标离线；6=越权；7=目标不存在。
+// 广播/多播只投在线启用设备，离线目标计入总数但不计成功，不做离线暂存。
+const maxPeerTargets = 500
+
+func (c *Client) handlePeer(fromID string, payload []byte) {
+	var req protocol.PeerMessage
+	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("mqtt peer: invalid JSON from %s: %v (payload: %.200s)", fromID, err, payload)
+		return
+	}
+
+	ack := protocol.PeerAck{ID: req.ID}
+
+	recordPeer := func(toID, status string) {
+		var tenantID uint
+		if dev, err := c.store.GetDevice(fromID); err == nil {
+			tenantID = dev.TenantID
+		}
+		if err := c.store.CreateDeviceMessage(&model.DeviceMessage{
+			MsgID: req.ID, FromDeviceID: fromID, ToDeviceID: toID,
+			TenantID: tenantID, Type: req.Type, Payload: string(req.Payload),
+			Status: status, Ts: time.Now().UnixMilli(),
+		}); err != nil {
+			log.Printf("mqtt peer: save message error: %v", err)
+		}
+	}
+
+	// 1) 参数校验
+	if req.ID == "" || req.To == "" {
+		ack.Code, ack.Msg = protocol.CodeParamError, "id/to required"
+		recordPeer(req.To, model.DeviceMsgRejected)
+		c.publishAck(protocol.TopicPeerAck(fromID), ack)
+		return
+	}
+
+	// 2) 发送方必须存在且启用（能发 peer 说明已过认证，双保险）
+	fromDev, err := c.store.GetDevice(fromID)
+	if err != nil || !fromDev.Enabled {
+		ack.Code, ack.Msg = protocol.CodeDeviceNotRegistered, "sender not registered"
+		recordPeer(req.To, model.DeviceMsgRejected)
+		c.publishAck(protocol.TopicPeerAck(fromID), ack)
+		return
+	}
+
+	targets, respCode, respMsg := c.resolvePeerTargets(fromDev, req.To)
+	if respCode != protocol.CodeSuccess {
+		ack.Code, ack.Msg = respCode, respMsg
+		recordPeer(req.To, peerStatusCode(respCode))
+		c.publishAck(protocol.TopicPeerAck(fromID), ack)
+		return
+	}
+
+	// 3) 逐目标校验 + 投递（单目标=点对点；广播/多播=同租户授权直通）
+	inboxMsg := protocol.InboxMessage{
+		ID: req.ID, From: fromID, Type: req.Type,
+		Payload: req.Payload, Ts: time.Now().UnixMilli(),
+	}
+	data, _ := json.Marshal(inboxMsg)
+
+	var delivered, offline int
+	var firstFailCode int
+	var firstFailMsg string
+	for _, toDev := range targets {
+		if toDev.ID == fromID {
+			continue // 广播不含自己
+		}
+		if !toDev.Enabled {
+			offline++
+			recordPeer(toDev.ID, model.DeviceMsgRecipientOffline)
+			continue
+		}
+		// 授权：同租户直通；跨租户（仅单目标模式可能产生）查白名单
+		if fromDev.TenantID != toDev.TenantID {
+			if _, err := c.store.GetPeerAllow(fromID, toDev.ID); err != nil {
+				if firstFailCode == 0 {
+					firstFailCode, firstFailMsg = protocol.CodeForbidden, "cross-tenant peer not allowed"
+				}
+				recordPeer(toDev.ID, model.DeviceMsgRejected)
+				continue
+			}
+		}
+		// 在线校验：平台只做在线投递，不做离线暂存
+		if toDev.Status != model.DeviceStatusOnline {
+			offline++
+			recordPeer(toDev.ID, model.DeviceMsgRecipientOffline)
+			continue
+		}
+		if token := c.client.Publish(protocol.TopicInbox(toDev.ID), 1, false, data); token.Error() != nil {
+			log.Printf("mqtt peer: publish inbox to %s error: %v", toDev.ID, token.Error())
+			offline++
+			recordPeer(toDev.ID, model.DeviceMsgRecipientOffline)
+			continue
+		}
+		delivered++
+		recordPeer(toDev.ID, model.DeviceMsgDelivered)
+
+		if c.bus != nil && fromDev.TenantID != 0 {
+			c.broadcast(fromDev.TenantID, "device_peer", map[string]interface{}{
+				"from_device_id": fromID, "to_device_id": toDev.ID,
+				"msg_id": req.ID, "type": req.Type, "status": model.DeviceMsgDelivered,
+			})
+		}
+	}
+
+	total := len(targets)
+	switch {
+	case delivered > 0:
+		ack.Code, ack.Msg = protocol.CodeSuccess, fmt.Sprintf("delivered %d/%d", delivered, total)
+	case firstFailCode != 0:
+		ack.Code, ack.Msg = firstFailCode, firstFailMsg
+	default:
+		ack.Code, ack.Msg = protocol.CodeDeviceOffline, fmt.Sprintf("no target online (0/%d)", total)
+	}
+	c.publishAck(protocol.TopicPeerAck(fromID), ack)
+}
+
+// resolvePeerTargets 把 to 字段解析为目标设备列表。
+// 返回 (目标列表, 0, "") 或 (nil, 错误码, 错误消息)。错误码复用 peer 协议码。
+func (c *Client) resolvePeerTargets(fromDev *model.Device, to string) ([]model.Device, int, string) {
+	to = strings.TrimSpace(to)
+
+	// 租户级广播
+	if to == "*" {
+		rows, err := c.store.ListPeerTargets(fromDev.TenantID, nil, nil, fromDev.ID, maxPeerTargets)
+		if err != nil {
+			log.Printf("mqtt peer: list broadcast targets error: %v", err)
+			return nil, protocol.CodeParamError, "resolve targets failed"
+		}
+		return rows, protocol.CodeSuccess, ""
+	}
+
+	// 项目级广播 project:{id}
+	if pid, ok := strings.CutPrefix(to, "project:"); ok {
+		var projectID uint
+		if _, err := fmt.Sscanf(strings.TrimSpace(pid), "%d", &projectID); err != nil || projectID == 0 {
+			return nil, protocol.CodeParamError, "invalid project id"
+		}
+		proj, err := c.store.GetProjectByID(projectID)
+		if err != nil {
+			return nil, protocol.CodePeerNotFound, "target project not found"
+		}
+		if proj.TenantID != fromDev.TenantID {
+			return nil, protocol.CodeForbidden, "project not in sender tenant"
+		}
+		rows, err := c.store.ListPeerTargets(fromDev.TenantID, &projectID, nil, fromDev.ID, maxPeerTargets)
+		if err != nil {
+			log.Printf("mqtt peer: list project targets error: %v", err)
+			return nil, protocol.CodeParamError, "resolve targets failed"
+		}
+		return rows, protocol.CodeSuccess, ""
+	}
+
+	// 逗号分隔多播 / 单设备 ID
+	parts := strings.Split(to, ",")
+	seen := make(map[string]bool, len(parts))
+	ids := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		ids = append(ids, p)
+	}
+	if len(ids) == 0 {
+		return nil, protocol.CodeParamError, "id/to required"
+	}
+	if len(ids) > maxPeerTargets {
+		return nil, protocol.CodeParamError, "too many targets"
+	}
+
+	if len(ids) == 1 {
+		// 点对点：保持原有语义（支持跨租户白名单）
+		toDev, err := c.store.GetDevice(ids[0])
+		if err != nil {
+			return nil, protocol.CodePeerNotFound, "target device not found"
+		}
+		return []model.Device{*toDev}, protocol.CodeSuccess, ""
+	}
+
+	// 多播：仅限同租户（设备 ID 字符集不含逗号，无歧义）
+	rows, err := c.store.ListPeerTargets(fromDev.TenantID, nil, ids, fromDev.ID, maxPeerTargets)
+	if err != nil {
+		log.Printf("mqtt peer: list multicast targets error: %v", err)
+		return nil, protocol.CodeParamError, "resolve targets failed"
+	}
+	if len(rows) == 0 {
+		return nil, protocol.CodePeerNotFound, "target device not found"
+	}
+	return rows, protocol.CodeSuccess, ""
+}
+
+// peerStatusCode 把 peer 协议错误码映射为留痕状态。
+func peerStatusCode(code int) string {
+	switch code {
+	case protocol.CodeForbidden:
+		return model.DeviceMsgRejected
+	case protocol.CodePeerNotFound:
+		return model.DeviceMsgTargetNotFound
+	default:
+		return model.DeviceMsgRejected
+	}
 }
 
 func (c *Client) publishAck(topic string, resp interface{}) {
 	payload, _ := json.Marshal(resp)
 	c.client.Publish(topic, 1, false, payload)
+}
+
+// handleClientEvent 处理 EMQX $SYS 客户端上下线事件，实时同步设备状态。
+// 主题形如 $SYS/brokers/<node>/clients/<clientid>/connected|disconnected。
+// clientid 由客户端自选（可能带前缀），设备ID以事件 payload 的 username 字段为准；
+// 平台自身连接忽略。设备连接即置在线，断开即置离线。
+func (c *Client) handleClientEvent(topic string, payload []byte) {
+	parts := strings.Split(topic, "/")
+	// $SYS / brokers / <node> / clients / <clientid> / <event>
+	if len(parts) < 6 {
+		return
+	}
+	clientID := parts[4]
+
+	var ev struct {
+		Username string `json:"username"`
+		Reason   string `json:"reason"`
+	}
+	_ = json.Unmarshal(payload, &ev)
+
+	// 设备接入时 username = 设备ID；取不到时退回 clientid（设备一般以ID为clientid）
+	deviceID := ev.Username
+	if deviceID == "" {
+		deviceID = clientID
+	}
+	if deviceID == "" || deviceID == c.cfg.ClientID {
+		return
+	}
+
+	// 仅处理已注册设备；认证失败的 clientid 不会产生 connected 事件
+	if _, err := c.store.GetDevice(deviceID); err != nil {
+		return
+	}
+
+	online := strings.HasSuffix(topic, "/connected")
+	if err := c.store.SetDeviceRuntimeStatus(deviceID, online); err != nil {
+		log.Printf("mqtt client event: set status error: %v", err)
+		return
+	}
+	log.Printf("mqtt client event: %s %s", deviceID, map[bool]string{true: "online", false: "offline"}[online])
+
+	if c.bus != nil {
+		if dev, err := c.store.GetDevice(deviceID); err == nil && dev.TenantID != 0 {
+			c.broadcast(dev.TenantID, "device_status", map[string]interface{}{
+				"device_id": deviceID, "online": online,
+			})
+		}
+	}
 }
 
 func (c *Client) PublishControl(deviceID string, cmd *protocol.DownlinkRequest) error {
@@ -181,6 +579,46 @@ func (c *Client) PublishControl(deviceID string, cmd *protocol.DownlinkRequest) 
 	return token.Error()
 }
 
+// PublishPing 向 wendao/{id}/ping 发布一条探活消息（ping 在线判定模式，QoS1）。
+// 不写控制日志；设备应答 wendao/{id}/ping/ack 后由 handlePingAck 刷新在线状态。
+func (c *Client) PublishPing(deviceID, pingID string) error {
+	payload, err := json.Marshal(protocol.DownlinkRequest{ID: pingID, Ts: time.Now().UnixMilli()})
+	if err != nil {
+		return err
+	}
+	token := c.client.Publish(protocol.TopicPing(deviceID), 1, false, payload)
+	token.Wait()
+	return token.Error()
+}
+
+// handlePingAck 设备探活应答：wendao/{id}/ping/ack（DownlinkResponse{id,code}）。
+// 应答即证明设备可达——刷新在线状态与 last_active（与上报/连接事件同一入口）；
+// 非法 JSON 忽略（不回应答，防止刷流量）。设备未注册/已禁用直接忽略。
+func (c *Client) handlePingAck(deviceID string, payload []byte) {
+	var ack protocol.DownlinkResponse
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		log.Printf("mqtt ping ack: invalid JSON from %s: %v (payload: %.200s)", deviceID, err, payload)
+		return
+	}
+	dev, err := c.store.GetDevice(deviceID)
+	if err != nil || !dev.Enabled {
+		return
+	}
+	if err := c.store.SetDeviceRuntimeStatus(deviceID, true); err != nil {
+		log.Printf("mqtt ping ack: set runtime status error: %v", err)
+		return
+	}
+	if dev.Status != model.DeviceStatusOnline {
+		// 由 ping 应答恢复在线时通知前端
+		if c.bus != nil && dev.TenantID != 0 {
+			c.broadcast(dev.TenantID, "device_status", map[string]interface{}{
+				"device_id": deviceID,
+				"online":    true,
+			})
+		}
+	}
+}
+
 func (c *Client) PublishRaw(topic string, payload []byte) error {
 	token := c.client.Publish(topic, 1, false, payload)
 	token.Wait()
@@ -190,9 +628,14 @@ func (c *Client) PublishRaw(topic string, payload []byte) error {
 func (c *Client) handleOTAProgress(deviceID string, payload []byte) {
 	var prog protocol.OTAProgress
 	if err := json.Unmarshal(payload, &prog); err != nil {
+		log.Printf("mqtt ota progress: invalid JSON from %s: %v (payload: %.200s)", deviceID, err, payload)
 		return
 	}
 
+	var tenantID uint
+	if dev, err := c.store.GetDevice(deviceID); err == nil {
+		tenantID = dev.TenantID
+	}
 	tasks, _ := c.store.ListOTATasks()
 	for _, task := range tasks {
 		if task.Status != model.OTATaskStatusRunning {
@@ -202,6 +645,9 @@ func (c *Client) handleOTAProgress(deviceID string, payload []byte) {
 		for _, l := range logs {
 			if l.DeviceID == deviceID && (l.Status == model.OTALogStatusPending || l.Status == model.OTALogStatusDownloading || l.Status == model.OTALogStatusInstalling) {
 				c.store.UpdateOTALogStatus(deviceID, task.ID, prog.Status, prog.Progress, "")
+				c.broadcast(tenantID, "ota_progress", map[string]interface{}{
+					"device_id": deviceID, "task_id": task.ID, "status": prog.Status, "progress": prog.Progress,
+				})
 				break
 			}
 		}
@@ -211,9 +657,14 @@ func (c *Client) handleOTAProgress(deviceID string, payload []byte) {
 func (c *Client) handleOTAAck(deviceID string, payload []byte) {
 	var ack protocol.OTAResponse
 	if err := json.Unmarshal(payload, &ack); err != nil {
+		log.Printf("mqtt ota ack: invalid JSON from %s: %v (payload: %.200s)", deviceID, err, payload)
 		return
 	}
 
+	var tenantID uint
+	if dev, err := c.store.GetDevice(deviceID); err == nil {
+		tenantID = dev.TenantID
+	}
 	status := model.OTALogStatusSuccess
 	errMsg := ""
 	if ack.Code != 0 {
@@ -230,6 +681,9 @@ func (c *Client) handleOTAAck(deviceID string, payload []byte) {
 		for _, l := range logs {
 			if l.DeviceID == deviceID && (l.Status == model.OTALogStatusPending || l.Status == model.OTALogStatusDownloading || l.Status == model.OTALogStatusInstalling) {
 				c.store.UpdateOTALogStatus(deviceID, task.ID, status, 100, errMsg)
+				c.broadcast(tenantID, "ota_ack", map[string]interface{}{
+					"device_id": deviceID, "task_id": task.ID, "status": status, "msg": errMsg,
+				})
 				break
 			}
 		}
@@ -237,8 +691,11 @@ func (c *Client) handleOTAAck(deviceID string, payload []byte) {
 	}
 }
 
-func StringFromUint(n uint) string {
-	return strconv.FormatUint(uint64(n), 10)
+func (c *Client) broadcast(tenantID uint, typ string, data interface{}) {
+	if c.bus == nil || tenantID == 0 {
+		return
+	}
+	c.bus.BroadcastToTenant(tenantID, events.Message{Type: typ, Data: data})
 }
 
 type Config struct {

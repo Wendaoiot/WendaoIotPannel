@@ -1,84 +1,67 @@
 package handler
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"wendaoiotpannel/internal/model"
 	"wendaoiotpannel/internal/store"
+	cryptopkg "wendaoiotpannel/pkg/crypto"
+	"wendaoiotpannel/pkg/token"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 )
 
-var jwtSecret = []byte("wendaoiot-secret-key")
+// tokenMgr 由 main 通过 InitJWTSecret 初始化。
+var tokenMgr *token.Manager
+
+// tokenTTL 控制登录 token 有效期。
+var tokenTTL = 24 * time.Hour
 
 func InitJWTSecret(secret string) {
-	if secret != "" {
-		jwtSecret = []byte(secret)
-	}
+	tokenMgr = token.NewManager(secret, tokenTTL)
 }
 
-type Claims struct {
-	UserID   uint   `json:"user_id"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	TenantID *uint  `json:"tenant_id"`
-	jwt.RegisteredClaims
-}
-
-func hashPassword(pwd string) string {
-	h := sha256.Sum256([]byte(pwd))
-	return hex.EncodeToString(h[:])
-}
-
+// Login 登录：角色以数据库为准，忽略前端传入的 role。
 func (h *Handler) Login(c *gin.Context) {
 	var req struct {
 		Username string `json:"username" binding:"required"`
 		Password string `json:"password" binding:"required"`
-		Role     string `json:"role" binding:"required"`
+		Role     string `json:"role"` // 仅前端分流用，不作为授权依据
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		authFail(c)
 		return
 	}
 
 	user, err := h.store.GetAdminUserByUsername(req.Username)
 	if err != nil {
-		fail(c, 401, "username or password incorrect")
+		authFail(c)
+		return
+	}
+	if !cryptopkg.CheckPassword(user.Password, req.Password) {
+		authFail(c)
 		return
 	}
 
-	if user.Role != req.Role {
-		fail(c, 401, "role mismatch")
-		return
-	}
-
-	if user.Password != hashPassword(req.Password) {
-		fail(c, 401, "username or password incorrect")
-		return
-	}
-
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
-		UserID:   user.ID,
-		Username: user.Username,
-		Role:     user.Role,
-		TenantID: user.TenantID,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-		},
-	}).SignedString(jwtSecret)
+	tokenStr, err := tokenMgr.Issue(token.Claims{
+		UserID:       user.ID,
+		Username:     user.Username,
+		Role:         user.Role,
+		TenantID:     user.TenantID,
+		TokenVersion: user.TokenVersion,
+	})
 	if err != nil {
-		fail(c, -1, err.Error())
+		authFail(c)
 		return
 	}
 
 	success(c, gin.H{
-		"token": token,
+		"token": tokenStr,
 		"user": gin.H{
 			"id":        user.ID,
 			"username":  user.Username,
@@ -88,6 +71,12 @@ func (h *Handler) Login(c *gin.Context) {
 	})
 }
 
+func authFail(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusUnauthorized, Response{Code: 401, Msg: "用户名或密码错误"})
+}
+
+// AuthMiddleware 校验 JWT：解析后每次查库，确认用户仍存在且 token_version 未变更。
+// 用户被删除、改密、重置密码后，旧 token 立即失效。
 func AuthMiddleware(s *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
@@ -95,42 +84,87 @@ func AuthMiddleware(s *store.Store) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, Response{Code: 401, Msg: "unauthorized"})
 			return
 		}
-
-		tokenStr := strings.TrimPrefix(auth, "Bearer ")
-		token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
-			return jwtSecret, nil
-		})
-		if err != nil || !token.Valid {
+		claims, err := tokenMgr.Parse(strings.TrimPrefix(auth, "Bearer "))
+		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, Response{Code: 401, Msg: "invalid token"})
 			return
 		}
 
-		claims, ok := token.Claims.(*Claims)
-		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, Response{Code: 401, Msg: "invalid token"})
+		user, err := s.GetAdminUserByIDFull(claims.UserID)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, Response{Code: 401, Msg: "用户不存在或已停用"})
+			return
+		}
+		if user.TokenVersion != claims.TokenVersion {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, Response{Code: 401, Msg: "登录已失效，请重新登录"})
 			return
 		}
 
-		c.Set("user_id", claims.UserID)
-		c.Set("username", claims.Username)
-		c.Set("role", claims.Role)
-		c.Set("tenant_id", claims.TenantID)
+		// 以库中最新身份为准，不信任 token 内的角色快照
+		c.Set("user_id", user.ID)
+		c.Set("username", user.Username)
+		c.Set("role", user.Role)
+		c.Set("tenant_id", user.TenantID)
 		c.Next()
 	}
 }
 
-func SeedAdminUsers(s *store.Store) {
-	superAdmin := model.AdminUser{
-		Username: "admin",
-		Password: hashPassword("admin123"),
-		Role:     model.RoleSuperAdmin,
+// RequireRole 限制仅指定角色可访问。
+func RequireRole(roles ...string) gin.HandlerFunc {
+	allowed := make(map[string]bool, len(roles))
+	for _, r := range roles {
+		allowed[r] = true
 	}
-	if _, err := s.GetAdminUserByUsername(superAdmin.Username); err != nil {
-		s.CreateAdminUser(&superAdmin)
+	return func(c *gin.Context) {
+		role := c.GetString("role")
+		if !allowed[role] {
+			c.AbortWithStatusJSON(http.StatusForbidden, Response{Code: 403, Msg: "无权操作"})
+			return
+		}
+		c.Next()
 	}
 }
 
-// User management handlers
+// SeedAdminUsers 启动时确保超级管理员存在。
+// 优先级：环境变量 WQ_ADMIN_PASSWORD；未提供则生成随机强密码并仅在启动日志打印一次。
+func SeedAdminUsers(s *store.Store) {
+	username := os.Getenv("WQ_ADMIN_USERNAME")
+	if username == "" {
+		username = "admin"
+	}
+	if _, err := s.GetAdminUserByUsername(username); err == nil {
+		return // 已存在，不改密
+	}
+
+	pwd := os.Getenv("WQ_ADMIN_PASSWORD")
+	if pwd == "" {
+		generated, err := cryptopkg.RandomPassword(16)
+		if err != nil {
+			log.Printf("seed admin: 生成随机密码失败: %v", err)
+			return
+		}
+		pwd = generated
+		log.Printf("======================================================")
+		log.Printf("首次启动：已创建超级管理员 %s，初始密码（仅显示一次，请立即登录修改）: %s", username, pwd)
+		log.Printf("也可通过环境变量 WQ_ADMIN_PASSWORD 指定，或设置 WQ_ADMIN_USERNAME 改用户名")
+		log.Printf("======================================================")
+	}
+
+	hash, err := cryptopkg.HashPassword(pwd)
+	if err != nil {
+		log.Printf("seed admin: hash error: %v", err)
+		return
+	}
+	if err := s.CreateAdminUser(&model.AdminUser{
+		Username: username,
+		Password: hash,
+		Role:     model.RoleSuperAdmin,
+	}); err != nil {
+		log.Printf("seed admin: create error: %v", err)
+	}
+}
+
+// ===== 用户管理 =====
 
 func (h *Handler) ListUsers(c *gin.Context) {
 	role, tenantID := getAuthInfo(c)
@@ -148,7 +182,7 @@ func (h *Handler) ListUsers(c *gin.Context) {
 func (h *Handler) ChangePassword(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		fail(c, 401, "unauthorized")
+		c.AbortWithStatusJSON(http.StatusUnauthorized, Response{Code: 401, Msg: "unauthorized"})
 		return
 	}
 
@@ -157,59 +191,81 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		NewPassword string `json:"new_password" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	uid := userID.(uint)
-	user, err := h.store.GetAdminUserByID(uid)
+	persisted, err := h.store.GetAdminUserByIDFull(uid)
 	if err != nil {
-		fail(c, -1, "用户不存在")
+		fail(c, http.StatusNotFound, "用户不存在")
 		return
 	}
-
-	userFull, err := h.store.GetAdminUserByUsername(user.Username)
+	fullUser, err := h.store.GetAdminUserByUsername(persisted.Username)
 	if err != nil {
-		fail(c, -1, "用户不存在")
+		fail(c, http.StatusNotFound, "用户不存在")
 		return
 	}
-
-	if userFull.Password != hashPassword(req.OldPassword) {
-		fail(c, -1, "原密码不正确")
+	if !cryptopkg.CheckPassword(fullUser.Password, req.OldPassword) {
+		fail(c, http.StatusBadRequest, "原密码不正确")
 		return
 	}
-
-	if len(req.NewPassword) < 4 {
-		fail(c, -1, "新密码长度不能少于4位")
+	newHash, err := cryptopkg.HashPassword(req.NewPassword)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	if err := h.store.UpdateAdminUserPassword(uid, hashPassword(req.NewPassword)); err != nil {
-		fail(c, -1, err.Error())
+	if err := h.store.UpdateAdminUserPasswordAndBump(uid, newHash); err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, nil)
 }
 
+// canManageUser 判定当前操作者能否管理目标用户（用于重置密码/删除）。
+func (h *Handler) canManageUser(c *gin.Context, targetID uint) bool {
+	role, tenantID := getAuthInfo(c)
+	target, err := h.store.GetAdminUserByIDFull(targetID)
+	if err != nil {
+		return false
+	}
+	if role == model.RoleSuperAdmin {
+		return true
+	}
+	// 租户管理员：只能管理本租户的租户管理员，不能动超管。
+	if target.Role == model.RoleSuperAdmin {
+		return false
+	}
+	if tenantID == nil || target.TenantID == nil || *target.TenantID != *tenantID {
+		return false
+	}
+	return true
+}
+
 func (h *Handler) AdminResetUserPassword(c *gin.Context) {
 	id, err := parseUintParam(c, "id")
 	if err != nil {
-		fail(c, -1, "invalid id")
+		fail(c, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if !h.canManageUser(c, uint(id)) {
+		c.AbortWithStatusJSON(http.StatusForbidden, Response{Code: 403, Msg: "无权操作此用户"})
 		return
 	}
 	var req struct {
 		NewPassword string `json:"new_password" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(req.NewPassword) < 4 {
-		fail(c, -1, "密码长度不能少于4位")
+	newHash, err := cryptopkg.HashPassword(req.NewPassword)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := h.store.UpdateAdminUserPassword(uint(id), hashPassword(req.NewPassword)); err != nil {
-		fail(c, -1, err.Error())
+	if err := h.store.UpdateAdminUserPasswordAndBump(uint(id), newHash); err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, nil)
@@ -218,16 +274,20 @@ func (h *Handler) AdminResetUserPassword(c *gin.Context) {
 func (h *Handler) DeleteUser(c *gin.Context) {
 	id, err := parseUintParam(c, "id")
 	if err != nil {
-		fail(c, -1, "invalid id")
+		fail(c, http.StatusBadRequest, "invalid id")
 		return
 	}
 	userID, _ := c.Get("user_id")
 	if uint(id) == userID.(uint) {
-		fail(c, -1, "不能删除自己")
+		fail(c, http.StatusBadRequest, "不能删除自己")
+		return
+	}
+	if !h.canManageUser(c, uint(id)) {
+		c.AbortWithStatusJSON(http.StatusForbidden, Response{Code: 403, Msg: "无权操作此用户"})
 		return
 	}
 	if err := h.store.DeleteAdminUser(uint(id)); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, nil)

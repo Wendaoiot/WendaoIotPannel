@@ -1,0 +1,69 @@
+# 问道物联面板 · 服务端配置示例
+#
+# 用法：复制为 config.yaml 后按需修改；
+#   更推荐通过环境变量注入敏感项（优先级高于本文件，前缀 WQ_）。
+#
+# 支持的环境变量（覆盖同名配置项）：
+#   WQ_CONFIG_PATH        配置文件路径（默认 config.yaml）
+#   WQ_SERVER_PORT        HTTP 监听端口
+#   WQ_JWT_SECRET         JWT 签名密钥（必填，≥16 位强随机；禁止留空或用默认值）
+#   WQ_MYSQL_HOST / WQ_MYSQL_PORT / WQ_MYSQL_USER / WQ_MYSQL_PASSWORD / WQ_MYSQL_DATABASE
+#   WQ_MQTT_BROKER / WQ_MQTT_CLIENT_ID / WQ_MQTT_USERNAME / WQ_MQTT_PASSWORD
+#   WQ_MQTT_AUTH_SECRET   EMQX 认证/ACL 回调共享密钥
+#   WQ_EMQX_API_BASE / WQ_EMQX_API_KEY / WQ_EMQX_API_SECRET   EMQX REST API（设备会话互踢）
+#   WQ_CORS_ORIGINS       允许的前端来源（逗号分隔）
+#   WQ_DEVICE_ONLINE_MODE  设备在线判定模式（connection / report）
+#   WQ_DEVICE_OFFLINE_TIMEOUT_SEC / WQ_DEVICE_SCAN_INTERVAL_SEC
+#   WQ_INSECURE=1         仅本地开发：跳过密钥强度校验（生产严禁使用）
+#
+# 生成强随机密钥：  openssl rand -base64 48
+
+server:
+  port: 8080
+  # jwt_secret 请勿提交真实值到仓库；生产用 WQ_JWT_SECRET 环境变量注入。
+  jwt_secret: "CHANGE_ME_to_a_long_random_secret_at_least_32_chars"
+  # CORS 白名单（生产必填；留空则仅放行本机开发端口）
+  cors_origins:
+    - http://localhost:3000
+    - http://localhost:3001
+  # EMQX 认证/ACL 回调共享密钥（EMQX 用 X-Auth-Key 或 ?secret= 携带）；与 EMQX 配置一致
+  mqtt_auth_secret: "CHANGE_ME_emqx_hook_secret"
+
+mysql:
+  host: 127.0.0.1
+  port: 3306
+  user: wendaoiot
+  password: "CHANGE_ME"
+  database: wendaoiot
+
+mqtt:
+  broker: tcp://127.0.0.1:1883
+  client_id: wendao_server
+  # 平台服务端连接 broker 的独立账号（设备接入鉴权在阶段三由 EMQX 认证回调处理）
+  username: ""
+  password: ""
+
+# 设备在线判定
+# online_mode:
+#   connection — 仅按 MQTT 连接判定（默认）：连接 broker 即在线、断开即离线；
+#                设备靠 MQTT keepalive 保活，不上报数据也保持在线。
+#                offline_timeout_sec 仅作 broker 宕机期间的兜底回收阈值。
+#   report     — 按上报判定：在 offline_timeout_sec 内有数据上报即在线
+#                （连接事件仍即时置在线/即时置离线，超时是对连接假死的补充）；
+#                offline_timeout_sec: 0 表示跟随全局默认超时。
+#   ping       — 按应答信号判定：平台每 ping_interval_sec 向 wendao/{id}/ping
+#                发探活，设备须订阅并向 wendao/{id}/ping/ack 回应；
+#                超过 offline_timeout_sec 未应答判离线。适用于常供电常连接设备，
+#                休眠设备不适用（需固件支持 ping 应答）。
+device:
+  online_mode: connection
+  offline_timeout_sec: 60
+  scan_interval_sec: 60
+  ping_interval_sec: 60
+
+# EMQX REST API：用于同设备重复连接互踢（认证通过后踢掉同 username 的旧会话）。
+# api_key/api_secret 在 EMQX Dashboard → 访问控制 → API 密钥 中创建；留空则互踢功能禁用。
+emqx:
+  api_base: http://127.0.0.1:18083
+  api_key: ""
+  api_secret: ""

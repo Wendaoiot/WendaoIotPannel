@@ -3,21 +3,30 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
+	"wendaoiotpannel/internal/events"
 	"wendaoiotpannel/internal/model"
 	"wendaoiotpannel/internal/protocol"
 	"wendaoiotpannel/internal/store"
+	cryptopkg "wendaoiotpannel/pkg/crypto"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
+// deviceIDPattern 设备 ID 规范：1-64 位字母/数字/下划线/短横线（大小写敏感）。
+var deviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 type Handler struct {
 	store *store.Store
 	mqtt  MQTTPublisher
+	bus   *events.Bus
 }
 
 type MQTTPublisher interface {
@@ -25,8 +34,8 @@ type MQTTPublisher interface {
 	PublishRaw(topic string, payload []byte) error
 }
 
-func New(s *store.Store, mqtt MQTTPublisher) *Handler {
-	return &Handler{store: s, mqtt: mqtt}
+func New(s *store.Store, mqtt MQTTPublisher, bus *events.Bus) *Handler {
+	return &Handler{store: s, mqtt: mqtt, bus: bus}
 }
 
 type Response struct {
@@ -41,6 +50,10 @@ func success(c *gin.Context, data interface{}) {
 
 func fail(c *gin.Context, code int, msg string) {
 	c.JSON(http.StatusOK, Response{Code: code, Msg: msg})
+}
+
+func forbidden(c *gin.Context, msg string) {
+	c.AbortWithStatusJSON(http.StatusForbidden, Response{Code: 403, Msg: msg})
 }
 
 func (h *Handler) HealthCheck(c *gin.Context) {
@@ -72,80 +85,138 @@ func (h *Handler) assertProjectBelongsToTenant(projectID uint, tenantID *uint) b
 // Tenant
 
 func (h *Handler) CreateTenant(c *gin.Context) {
+	if role, _ := getAuthInfo(c); role != model.RoleSuperAdmin {
+		forbidden(c, "仅平台超级管理员可创建租户")
+		return
+	}
 	var req struct {
-		Name     string `json:"name" binding:"required"`
-		AdminPwd string `json:"admin_pwd"`
+		Name      string `json:"name" binding:"required"`
+		AdminUser string `json:"admin_username"` // 可选：指定管理员登录名；不填则用 <租户名>_admin
+		AdminPwd  string `json:"admin_pwd"`      // 可选：不填则生成随机一次性密码
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, -1, err.Error())
 		return
 	}
 	t := &model.Tenant{Name: req.Name}
+	if exists, err := h.store.TenantNameExists(req.Name); err == nil && exists {
+		fail(c, http.StatusBadRequest, "租户名称已存在")
+		return
+	}
 	if err := h.store.CreateTenant(t); err != nil {
-		fail(c, -1, err.Error())
+		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate") {
+			fail(c, http.StatusBadRequest, "租户名称已存在")
+			return
+		}
+		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	pwd := req.AdminPwd
+	generated := false
 	if pwd == "" {
-		pwd = "123456"
-	}
-	adminUser := &model.AdminUser{
-		Username: t.Name + "_admin",
-		Password: hashPassword(pwd),
-		Role:     model.RoleTenantAdmin,
-		TenantID: &t.ID,
-	}
-	if err := h.store.CreateAdminUser(adminUser); err != nil {
-		adminUser.Username = fmt.Sprintf("tenant_%d", t.ID)
-		if err2 := h.store.CreateAdminUser(adminUser); err2 != nil {
+		p, err := cryptopkg.RandomPassword(12)
+		if err != nil {
+			fail(c, http.StatusInternalServerError, err.Error())
+			return
 		}
+		pwd = p
+		generated = true
+	}
+
+	hash := cryptopkg.MustHashPassword(pwd)
+	usernames := []string{}
+	if req.AdminUser != "" {
+		usernames = append(usernames, req.AdminUser)
+	}
+	usernames = append(usernames, t.Name+"_admin", fmt.Sprintf("tenant_%d", t.ID))
+
+	var created *model.AdminUser
+	for _, uname := range usernames {
+		if uname == "" {
+			continue
+		}
+		u := &model.AdminUser{Username: uname, Password: hash, Role: model.RoleTenantAdmin, TenantID: &t.ID}
+		if err := h.store.CreateAdminUser(u); err == nil {
+			created = u
+			break
+		}
+	}
+	if created == nil {
+		fail(c, http.StatusConflict, "租户已创建，但管理员账号因用户名冲突未生成，请在用户管理中手动创建")
+		return
 	}
 
 	success(c, gin.H{
 		"tenant":     t,
-		"admin_user": adminUser.Username,
+		"admin_user": created.Username,
 		"admin_pwd":  pwd,
+		"generated":  generated,
 	})
 }
 
 func (h *Handler) ListTenants(c *gin.Context) {
+	if role, _ := getAuthInfo(c); role != model.RoleSuperAdmin {
+		forbidden(c, "仅平台超级管理员可查看租户列表")
+		return
+	}
 	tenants, err := h.store.ListTenants()
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, tenants)
 }
 
 func (h *Handler) UpdateTenant(c *gin.Context) {
+	if role, _ := getAuthInfo(c); role != model.RoleSuperAdmin {
+		forbidden(c, "仅平台超级管理员可修改租户")
+		return
+	}
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
-		fail(c, -1, "invalid id")
+		fail(c, http.StatusBadRequest, "invalid id")
 		return
 	}
 	var req struct {
 		Name string `json:"name" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if exists, err := h.store.TenantNameExists(req.Name); err == nil && exists {
+		// 自己改名（占用行是自身）时放行
+		if t, gerr := h.store.GetTenantByID(uint(id)); gerr == nil && t.Name == req.Name {
+			success(c, nil)
+			return
+		}
+		fail(c, http.StatusBadRequest, "租户名称已存在")
 		return
 	}
 	if err := h.store.UpdateTenant(uint(id), req.Name); err != nil {
-		fail(c, -1, err.Error())
+		if strings.Contains(err.Error(), "1062") || strings.Contains(err.Error(), "Duplicate") {
+			fail(c, http.StatusBadRequest, "租户名称已存在")
+			return
+		}
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, nil)
 }
 
 func (h *Handler) DeleteTenant(c *gin.Context) {
+	if role, _ := getAuthInfo(c); role != model.RoleSuperAdmin {
+		forbidden(c, "仅平台超级管理员可删除租户")
+		return
+	}
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
-		fail(c, -1, "invalid id")
+		fail(c, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := h.store.DeleteTenant(uint(id)); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, nil)
@@ -274,21 +345,40 @@ func (h *Handler) CreateDevice(c *gin.Context) {
 		fail(c, -1, err.Error())
 		return
 	}
+	// 设备 ID 规范：1-64 位字母/数字/下划线/短横线；大小写敏感（utf8mb4_bin）
+	if !deviceIDPattern.MatchString(req.ID) {
+		fail(c, http.StatusBadRequest, "设备ID不合法：仅允许 1-64 位字母/数字/下划线/短横线，且区分大小写")
+		return
+	}
 	if !h.assertProjectBelongsToTenant(req.ProjectID, tenantID) {
 		fail(c, 403, "无权在此项目中创建设备")
 		return
 	}
-	d := &model.Device{
-		ID:        req.ID,
-		ProjectID: req.ProjectID,
-		Name:      req.Name,
-		Status:    model.DeviceStatusOffline,
-	}
-	if err := h.store.CreateDevice(d); err != nil {
-		fail(c, -1, err.Error())
+	proj, err := h.store.GetProjectByID(req.ProjectID)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "项目不存在")
 		return
 	}
-	success(c, d)
+	secret, err := cryptopkg.RandomPassword(20)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	secretHash := cryptopkg.MustHashPassword(secret)
+	d := &model.Device{
+		ID:           req.ID,
+		ProjectID:    req.ProjectID,
+		TenantID:     proj.TenantID,
+		Name:         req.Name,
+		Status:       model.DeviceStatusOffline,
+		Enabled:      true,
+		DeviceSecret: secretHash,
+	}
+	if err := h.store.CreateDeviceWithSecret(d, secretHash); err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	success(c, gin.H{"device": d, "device_secret": secret, "secret_note": "接入密钥仅此一次返回，请妥善保存"})
 }
 
 func (h *Handler) ListDevices(c *gin.Context) {
@@ -361,21 +451,37 @@ func (h *Handler) UpdateDevice(c *gin.Context) {
 	var req struct {
 		Name      string `json:"name" binding:"required"`
 		ProjectID uint   `json:"project_id" binding:"required"`
-		Status    *int   `json:"status"`
+		// 设备级在线判定：connection=仅按连接(默认) / report=按上报时间 / ping=按应答信号；
+		// 空串（历史值“跟随全局”）与未知值一律归一为 connection。超时 0=沿用全局时限，上限 7 天
+		OnlineMode        string `json:"online_mode"`
+		OfflineTimeoutSec *int   `json:"offline_timeout_sec"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, -1, err.Error())
 		return
 	}
+	switch req.OnlineMode {
+	case "", "connection", "report", "ping":
+		if req.OnlineMode == "" {
+			req.OnlineMode = "connection"
+		}
+	default:
+		fail(c, -1, "online_mode 仅支持：connection/report/ping")
+		return
+	}
+	offlineTimeoutSec := 0
+	if req.OfflineTimeoutSec != nil {
+		if *req.OfflineTimeoutSec < 0 || *req.OfflineTimeoutSec > 604800 {
+			fail(c, -1, "offline_timeout_sec 取值范围 0(沿用全局时限)~604800")
+			return
+		}
+		offlineTimeoutSec = *req.OfflineTimeoutSec
+	}
 	if !h.assertProjectBelongsToTenant(req.ProjectID, tenantID) {
 		fail(c, 403, "无权将设备迁移到此项目")
 		return
 	}
-	status := model.DeviceStatusOffline
-	if req.Status != nil {
-		status = *req.Status
-	}
-	if err := h.store.UpdateDevice(deviceID, req.Name, req.ProjectID, status); err != nil {
+	if err := h.store.UpdateDevice(deviceID, req.Name, req.ProjectID, req.OnlineMode, offlineTimeoutSec); err != nil {
 		fail(c, -1, err.Error())
 		return
 	}
@@ -400,23 +506,32 @@ func (h *Handler) DeleteDevice(c *gin.Context) {
 
 func (h *Handler) CreateDeviceTag(c *gin.Context) {
 	deviceID := c.Param("deviceId")
+	_, tenantID := getAuthInfo(c)
+	if !h.assertDeviceBelongsToTenant(deviceID, tenantID) {
+		forbidden(c, "无权操作此设备")
+		return
+	}
 	var req struct {
 		TagKey    string `json:"tag_key" binding:"required"`
-		Interface string `json:"interface" binding:"required"`
+		Name      string `json:"name"`
+		Unit      string `json:"unit"`
+		Interface string `json:"interface"`
 		Formula   string `json:"formula"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	t := &model.DeviceTag{
 		DeviceID:  deviceID,
 		TagKey:    req.TagKey,
+		Name:      req.Name,
+		Unit:      req.Unit,
 		Interface: req.Interface,
 		Formula:   req.Formula,
 	}
 	if err := h.store.CreateDeviceTag(t); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, t)
@@ -424,9 +539,14 @@ func (h *Handler) CreateDeviceTag(c *gin.Context) {
 
 func (h *Handler) ListDeviceTags(c *gin.Context) {
 	deviceID := c.Param("deviceId")
+	_, tenantID := getAuthInfo(c)
+	if !h.assertDeviceBelongsToTenant(deviceID, tenantID) {
+		forbidden(c, "无权查看此设备")
+		return
+	}
 	tags, err := h.store.ListDeviceTags(deviceID)
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, tags)
@@ -437,11 +557,21 @@ func (h *Handler) DeleteDeviceTag(c *gin.Context) {
 		ID uint `json:"id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	_, tenantID := getAuthInfo(c)
+	tag, err := h.store.GetDeviceTagByID(req.ID)
+	if err != nil {
+		fail(c, http.StatusNotFound, "标签不存在")
+		return
+	}
+	if !h.assertDeviceBelongsToTenant(tag.DeviceID, tenantID) {
+		forbidden(c, "无权操作此设备标签")
 		return
 	}
 	if err := h.store.DeleteDeviceTag(req.ID); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, nil)
@@ -453,7 +583,12 @@ func (h *Handler) CreateProjectTag(c *gin.Context) {
 	projectID := c.Param("id")
 	pid, err := strconv.ParseUint(projectID, 10, 64)
 	if err != nil {
-		fail(c, -1, "invalid project id")
+		fail(c, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	_, tenantID := getAuthInfo(c)
+	if !h.assertProjectBelongsToTenant(uint(pid), tenantID) {
+		forbidden(c, "无权操作此项目")
 		return
 	}
 	var req struct {
@@ -464,7 +599,7 @@ func (h *Handler) CreateProjectTag(c *gin.Context) {
 		Writable bool   `json:"writable"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.TagName == "" {
@@ -482,7 +617,7 @@ func (h *Handler) CreateProjectTag(c *gin.Context) {
 		Writable:  req.Writable,
 	}
 	if err := h.store.CreateProjectTag(t); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, t)
@@ -492,12 +627,17 @@ func (h *Handler) ListProjectTags(c *gin.Context) {
 	projectID := c.Param("id")
 	pid, err := strconv.ParseUint(projectID, 10, 64)
 	if err != nil {
-		fail(c, -1, "invalid project id")
+		fail(c, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	_, tenantID := getAuthInfo(c)
+	if !h.assertProjectBelongsToTenant(uint(pid), tenantID) {
+		forbidden(c, "无权查看此项目")
 		return
 	}
 	tags, err := h.store.ListProjectTags(uint(pid))
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, tags)
@@ -508,11 +648,21 @@ func (h *Handler) DeleteProjectTag(c *gin.Context) {
 		ID uint `json:"id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	_, tenantID := getAuthInfo(c)
+	tag, err := h.store.GetProjectTagByID(req.ID)
+	if err != nil {
+		fail(c, http.StatusNotFound, "标签不存在")
+		return
+	}
+	if !h.assertProjectBelongsToTenant(tag.ProjectID, tenantID) {
+		forbidden(c, "无权操作此项目标签")
 		return
 	}
 	if err := h.store.DeleteProjectTag(req.ID); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	success(c, nil)
@@ -522,6 +672,11 @@ func (h *Handler) DeleteProjectTag(c *gin.Context) {
 
 func (h *Handler) GetDeviceData(c *gin.Context) {
 	deviceID := c.Param("deviceId")
+	_, tenantID := getAuthInfo(c)
+	if !h.assertDeviceBelongsToTenant(deviceID, tenantID) {
+		forbidden(c, "无权查看此设备数据")
+		return
+	}
 	limit := 100
 	offset := 0
 	if l := c.Query("limit"); l != "" {
@@ -537,9 +692,16 @@ func (h *Handler) GetDeviceData(c *gin.Context) {
 	if limit > 500 {
 		limit = 500
 	}
-	data, total, err := h.store.ListDeviceData(deviceID, limit, offset)
+	var start, end *time.Time
+	if t, err := parseTimeQuery(c.Query("start")); err == nil && t != nil {
+		start = t
+	}
+	if t, err := parseTimeQuery(c.Query("end")); err == nil && t != nil {
+		end = t
+	}
+	data, total, err := h.store.ListDeviceDataRange(deviceID, start, end, limit, offset)
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -548,6 +710,7 @@ func (h *Handler) GetDeviceData(c *gin.Context) {
 		DeviceID  string                 `json:"device_id"`
 		MsgID     string                 `json:"msg_id"`
 		Ts        int64                  `json:"ts"`
+		DeviceTs  int64                  `json:"device_ts"`
 		Version   string                 `json:"version"`
 		Data      map[string]interface{} `json:"data"`
 		CreatedAt interface{}            `json:"created_at"`
@@ -561,10 +724,15 @@ func (h *Handler) GetDeviceData(c *gin.Context) {
 			DeviceID:  d.DeviceID,
 			MsgID:     d.MsgID,
 			Ts:        d.Ts,
+			DeviceTs:  d.DeviceTs,
 			Version:   d.Version,
 			Data:      parsed,
 			CreatedAt: d.CreatedAt,
 		})
+	}
+	if strings.EqualFold(c.Query("export"), "csv") {
+		h.exportDeviceDataCSV(c, data)
+		return
 	}
 	success(c, gin.H{
 		"list":   result,
@@ -580,24 +748,28 @@ func (h *Handler) SendControl(c *gin.Context) {
 	deviceID := c.Param("deviceId")
 	_, tenantID := getAuthInfo(c)
 	if !h.assertDeviceBelongsToTenant(deviceID, tenantID) {
-		fail(c, 403, "无权操作此设备")
+		forbidden(c, "无权操作此设备")
 		return
 	}
 	var req struct {
 		Tags map[string]float64 `json:"tags" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	dev, err := h.store.GetDevice(deviceID)
 	if err != nil {
-		fail(c, -1, "device not found")
+		fail(c, http.StatusNotFound, "设备不存在")
 		return
 	}
-	if dev.Status == model.DeviceStatusInactive {
-		fail(c, -1, "设备未激活，无法下发指令")
+	if !dev.Enabled {
+		fail(c, http.StatusConflict, "设备已被禁用，无法下发指令")
+		return
+	}
+	if dev.Status != model.DeviceStatusOnline {
+		fail(c, http.StatusConflict, "设备当前离线，指令无法送达；请等待设备上线后再操作")
 		return
 	}
 
@@ -609,24 +781,40 @@ func (h *Handler) SendControl(c *gin.Context) {
 	}
 
 	tagsJSON, _ := json.Marshal(req.Tags)
-	log := &model.ControlLog{
+	clog := &model.ControlLog{
 		DeviceID: deviceID,
+		TenantID: dev.TenantID,
 		MsgID:    msgID,
 		Tags:     string(tagsJSON),
+		Status:   model.ControlStatusPending,
 	}
-	if err := h.store.CreateControlLog(log); err != nil {
+	if err := h.store.CreateControlLogScoped(clog); err != nil {
+		log.Printf("create control log error: %v", err)
 	}
 
 	if err := h.mqtt.PublishControl(deviceID, cmd); err != nil {
+		_ = h.store.ApplyControlAck(msgID, -1, "下发失败: "+err.Error())
 		fail(c, -1, err.Error())
 		return
 	}
+	_ = h.store.SetControlLogDeliveredOrErr(msgID, true)
 
-	success(c, gin.H{"msg_id": msgID})
+	success(c, gin.H{
+		"msg_id": msgID,
+		"status": model.ControlStatusDelivered,
+		"hint":   "指令已下发，设备执行结果将在数秒内回传（可在本页/控制日志查看 ack）",
+	})
 }
 
 func (h *Handler) ListControlLogs(c *gin.Context) {
 	deviceID := c.Query("device_id")
+	if deviceID != "" {
+		_, tenantID := getAuthInfo(c)
+		if !h.assertDeviceBelongsToTenant(deviceID, tenantID) {
+			forbidden(c, "无权查看该设备的控制日志")
+			return
+		}
+	}
 	limit := 50
 	offset := 0
 	if l := c.Query("limit"); l != "" {
@@ -639,9 +827,23 @@ func (h *Handler) ListControlLogs(c *gin.Context) {
 			offset = v
 		}
 	}
-	logs, total, err := h.store.ListControlLogs(deviceID, limit, offset)
+	var start, end *time.Time
+	if t, err := parseTimeQuery(c.Query("start")); err == nil && t != nil {
+		start = t
+	}
+	if t, err := parseTimeQuery(c.Query("end")); err == nil && t != nil {
+		end = t
+	}
+	_, tenantID := getAuthInfo(c)
+	logs, total, err := h.store.ListControlLogsScoped(tenantID, deviceID, start, end, limit, offset)
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// 支持导出 CSV
+	if strings.EqualFold(c.Query("export"), "csv") {
+		h.exportControlLogsCSV(c, logs)
 		return
 	}
 	success(c, gin.H{"list": logs, "total": total})
@@ -664,19 +866,24 @@ func (h *Handler) GetProjectData(c *gin.Context) {
 	projectID := c.Param("id")
 	pid, err := strconv.ParseUint(projectID, 10, 64)
 	if err != nil {
-		fail(c, -1, "invalid project id")
+		fail(c, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	_, tenantID := getAuthInfo(c)
+	if !h.assertProjectBelongsToTenant(uint(pid), tenantID) {
+		forbidden(c, "无权查看此项目数据")
 		return
 	}
 
 	projTags, err := h.store.ListProjectTags(uint(pid))
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	devices, err := h.store.ListDevicesByProject(uint(pid))
 	if err != nil {
-		fail(c, -1, err.Error())
+		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
