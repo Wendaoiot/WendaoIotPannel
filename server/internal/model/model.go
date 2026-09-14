@@ -16,12 +16,32 @@ type Tenant struct {
 }
 
 type Project struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	TenantID  uint           `gorm:"index;uniqueIndex:uk_proj_tenant_name" json:"tenant_id"`
-	Name      string         `gorm:"type:varchar(100);uniqueIndex:uk_proj_tenant_name" json:"name"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	TenantID uint   `gorm:"index;uniqueIndex:uk_proj_tenant_name" json:"tenant_id"`
+	Name     string `gorm:"type:varchar(100);uniqueIndex:uk_proj_tenant_name" json:"name"`
+	// 项目级在线判定默认（设备未显式覆盖时生效；空值/0 表示沿用系统 config 默认）：
+	//   OnlineMode        — '' / connection / report / ping
+	//   OfflineTimeoutSec — 0=沿用系统 offline_timeout_sec
+	OnlineMode        string         `gorm:"type:varchar(20);default:''" json:"online_mode"`
+	OfflineTimeoutSec int            `gorm:"default:0" json:"offline_timeout_sec"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `gorm:"index" json:"-"`
+}
+
+// Product 产品（一型一密）：同型号设备烧录同一套 ProductKey/ProductSecret，
+// 首次 mqtts 连接时动态注册换取一机一密。产品为租户级实体。
+type Product struct {
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	ProductKey    string `gorm:"type:varchar(40) COLLATE utf8mb4_bin;uniqueIndex" json:"product_key"`
+	ProductSecret string `gorm:"type:varchar(128)" json:"-"` // bcrypt 哈希，明文仅创建/重置时返回一次
+	TenantID      uint   `gorm:"index" json:"tenant_id"`
+	Name          string `gorm:"type:varchar(100)" json:"name"`
+	// DynRegEnabled 产品级动态注册开关：关闭后引导连接直接拒绝
+	DynRegEnabled bool           `gorm:"default:true" json:"dyn_reg_enabled"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 const (
@@ -40,6 +60,11 @@ type Device struct {
 	Status       int    `gorm:"default:0" json:"status"`
 	Enabled      bool   `gorm:"default:true" json:"enabled"` // false 等价于禁用(Inactive)：拒绝上报/控制
 	DeviceSecret string `gorm:"type:varchar(128)" json:"-"`  // 一机一密，接入 EMQX 认证
+	// 一型一密动态注册：
+	//   ProductID > 0 且 DeviceSecret 为空 = 已预录待激活（仅允许引导注册连接）；
+	//   激活写入一机一密后置 ActivatedAt；ProductID = 0 为传统手工创建设备。
+	ProductID   uint       `gorm:"index" json:"product_id"`
+	ActivatedAt *time.Time `json:"activated_at"`
 	// 设备级在线判定（系统默认 connection；历史空串等同 connection）：
 	//   connection — 按 MQTT 连接/断开事件实时判定
 	//   report     — 按上报超时判定（连接事件仍置在线，超时未上报由扫描回收）

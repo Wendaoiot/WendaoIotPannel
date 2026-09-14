@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"wendaoiotpannel/internal/events"
+	"wendaoiotpannel/internal/metrics"
 	"wendaoiotpannel/internal/model"
 	"wendaoiotpannel/internal/protocol"
 	"wendaoiotpannel/internal/store"
@@ -332,6 +333,87 @@ func (h *Handler) DeleteProject(c *gin.Context) {
 	success(c, nil)
 }
 
+// UpdateProjectSettings 保存项目级在线判定默认（空串/0 = 沿用系统默认）。
+func (h *Handler) UpdateProjectSettings(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		fail(c, -1, "invalid id")
+		return
+	}
+	_, tenantID := getAuthInfo(c)
+	if !h.assertProjectBelongsToTenant(uint(id), tenantID) {
+		fail(c, 403, "无权操作此项目")
+		return
+	}
+	mode, timeoutSec, ok := parseOnlineDefaultBody(c)
+	if !ok {
+		return
+	}
+	if err := h.store.UpdateProjectSettings(uint(id), mode, timeoutSec); err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	success(c, nil)
+}
+
+// ApplyProjectOnlineDefault 把项目在线判定默认显式写入该项目全部设备（覆盖设备各自设置）。
+func (h *Handler) ApplyProjectOnlineDefault(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		fail(c, -1, "invalid id")
+		return
+	}
+	_, tenantID := getAuthInfo(c)
+	if !h.assertProjectBelongsToTenant(uint(id), tenantID) {
+		fail(c, 403, "无权操作此项目")
+		return
+	}
+	mode, timeoutSec, ok := parseOnlineDefaultBody(c)
+	if !ok {
+		return
+	}
+	// 一键应用要求显式模式：不能把“跟随系统默认”的空值固化到每台设备上
+	if mode == "" {
+		fail(c, http.StatusBadRequest, "请先把项目默认设为具体的判定方式（仅按连接/按上报时间/按应答信号）再应用")
+		return
+	}
+	n, err := h.store.ApplyProjectOnlineDefault(uint(id), mode, timeoutSec)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	success(c, gin.H{"affected": n})
+}
+
+// parseOnlineDefaultBody 解析并校验在线判定默认请求体。
+// 合法返回 (归一化模式, 超时秒, true)；非法已写响应，返回 false。
+func parseOnlineDefaultBody(c *gin.Context) (string, int, bool) {
+	var req struct {
+		OnlineMode        string `json:"online_mode"`
+		OfflineTimeoutSec *int   `json:"offline_timeout_sec"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return "", 0, false
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.OnlineMode))
+	switch mode {
+	case "", "connection", "report", "ping":
+	default:
+		fail(c, http.StatusBadRequest, "online_mode 仅支持：connection/report/ping（或空串表示沿用系统默认）")
+		return "", 0, false
+	}
+	timeoutSec := 0
+	if req.OfflineTimeoutSec != nil {
+		if *req.OfflineTimeoutSec < 0 || *req.OfflineTimeoutSec > 604800 {
+			fail(c, http.StatusBadRequest, "offline_timeout_sec 取值范围 0(沿用系统时限)~604800")
+			return "", 0, false
+		}
+		timeoutSec = *req.OfflineTimeoutSec
+	}
+	return mode, timeoutSec, true
+}
+
 // Device
 
 func (h *Handler) CreateDevice(c *gin.Context) {
@@ -451,8 +533,8 @@ func (h *Handler) UpdateDevice(c *gin.Context) {
 	var req struct {
 		Name      string `json:"name" binding:"required"`
 		ProjectID uint   `json:"project_id" binding:"required"`
-		// 设备级在线判定：connection=仅按连接(默认) / report=按上报时间 / ping=按应答信号；
-		// 空串（历史值“跟随全局”）与未知值一律归一为 connection。超时 0=沿用全局时限，上限 7 天
+		// 设备级在线判定：''=跟随项目默认（项目也为空则跟系统默认，最终 connection）、
+		// connection/report/ping=设备显式覆盖。超时 0=沿用上级时限，上限 7 天
 		OnlineMode        string `json:"online_mode"`
 		OfflineTimeoutSec *int   `json:"offline_timeout_sec"`
 	}
@@ -460,19 +542,17 @@ func (h *Handler) UpdateDevice(c *gin.Context) {
 		fail(c, -1, err.Error())
 		return
 	}
-	switch req.OnlineMode {
+	switch strings.ToLower(strings.TrimSpace(req.OnlineMode)) {
 	case "", "connection", "report", "ping":
-		if req.OnlineMode == "" {
-			req.OnlineMode = "connection"
-		}
+		req.OnlineMode = strings.ToLower(strings.TrimSpace(req.OnlineMode))
 	default:
-		fail(c, -1, "online_mode 仅支持：connection/report/ping")
+		fail(c, -1, "online_mode 仅支持：connection/report/ping（或空串表示跟随项目默认）")
 		return
 	}
 	offlineTimeoutSec := 0
 	if req.OfflineTimeoutSec != nil {
 		if *req.OfflineTimeoutSec < 0 || *req.OfflineTimeoutSec > 604800 {
-			fail(c, -1, "offline_timeout_sec 取值范围 0(沿用全局时限)~604800")
+			fail(c, -1, "offline_timeout_sec 取值范围 0(沿用上级时限)~604800")
 			return
 		}
 		offlineTimeoutSec = *req.OfflineTimeoutSec
@@ -798,6 +878,8 @@ func (h *Handler) SendControl(c *gin.Context) {
 		return
 	}
 	_ = h.store.SetControlLogDeliveredOrErr(msgID, true)
+	// 仪表盘消息流出实时计数（业务指令；OTA/ping 不计）
+	metrics.AddOut(dev.TenantID)
 
 	success(c, gin.H{
 		"msg_id": msgID,
@@ -858,7 +940,26 @@ func (h *Handler) GetDashboardStats(c *gin.Context) {
 		fail(c, -1, err.Error())
 		return
 	}
-	success(c, stats)
+	// 实时消息速率（当前服务节点内存环形桶，重启清零；历史量见数据库计数字段）
+	snap := metrics.SnapshotPoints(tenantID, 30)
+	success(c, gin.H{
+		"total_tenants":         stats.TotalTenants,
+		"total_projects":        stats.TotalProjects,
+		"total_devices":         stats.TotalDevices,
+		"online_devices":        stats.OnlineDevices,
+		"disabled_devices":      stats.DisabledDevices,
+		"pending_devices":       stats.PendingDevices,
+		"messages_in_24h":       stats.MessagesIn24H,
+		"messages_out_24h":      stats.MessagesOut24H,
+		"messages_in_total_db":  stats.MessagesInAll,
+		"messages_out_total_db": stats.MessagesOutAll,
+		"in_rate":               snap.InRate,
+		"out_rate":              snap.OutRate,
+		"in_total":              snap.InTotal,
+		"out_total":             snap.OutTotal,
+		"series_in":             snap.SeriesIn,
+		"series_out":            snap.SeriesOut,
+	})
 }
 
 // ProjectData 项目数据聚合
@@ -926,9 +1027,8 @@ func (h *Handler) GetProjectData(c *gin.Context) {
 		}
 
 		for _, d := range devices {
-			if _, ok := deviceTagMap[d.ID][pt.TagKey]; !ok {
-				continue
-			}
+			// 默认映射：项目字典中的数据点对项目下所有设备生效，无需再为每台设备
+			// 单独配置同键设备标签；设备标签仅用于需要接口/公式等设备级覆盖的场景。
 			dv := DeviceValue{
 				DeviceID:   d.ID,
 				DeviceName: d.Name,

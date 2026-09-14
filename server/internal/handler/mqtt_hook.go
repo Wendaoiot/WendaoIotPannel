@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"wendaoiotpannel/internal/protocol"
 	cryptopkg "wendaoiotpannel/pkg/crypto"
 
 	"github.com/gin-gonic/gin"
@@ -103,6 +104,15 @@ func (h *Handler) EMQXAuthenticate(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "bad request"})
 		return
 	}
+
+	// 一型一密引导连接：username = "{SN}&{ProductKey}"，password = 产品密钥明文。
+	// 仅当：产品存在且开启动态注册、产品密钥 bcrypt 匹配、SN 已预录到该产品、
+	// 设备启用且尚未激活（无一机一密）时放行；不触发互踢。
+	if sn, productKey, isBootstrap := protocol.ParseBootstrapUsername(req.Username); isBootstrap {
+		h.authBootstrap(c, sn, productKey, req.Password)
+		return
+	}
+
 	dev, err := h.store.GetDeviceAuthRecord(req.Username)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "device not found"})
@@ -130,7 +140,8 @@ func (h *Handler) EMQXAuthenticate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"result": "allow", "is_superuser": false})
 }
 
-// EMQXACL 授权：设备只能 pub/sub 自己 wendao/{deviceID}/... 的允许主题。
+// EMQXACL 授权：普通设备只能 pub/sub 自己 wendao/{deviceID}/... 的允许主题。
+// 引导连接（username 含 '&'）仅允许其自身 SN 的注册双主题，其余一律 deny（EMQX 配合踢线）。
 func (h *Handler) EMQXACL(c *gin.Context) {
 	if !checkHookSecret(c) {
 		return
@@ -138,6 +149,12 @@ func (h *Handler) EMQXACL(c *gin.Context) {
 	var req emqxACLReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, gin.H{"result": "deny"})
+		return
+	}
+
+	// 一型一密引导连接 ACL 特判
+	if sn, _, isBootstrap := protocol.ParseBootstrapUsername(req.Username); isBootstrap {
+		c.JSON(http.StatusOK, gin.H{"result": h.bootstrapACLResult(req.Action, sn, req.Topic)})
 		return
 	}
 
@@ -176,4 +193,63 @@ func (h *Handler) EMQXACL(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "topic not permitted"})
 	}
+}
+
+// authBootstrap 一型一密引导连接认证（详见 EMQXAuthenticate 内分支注释）。
+// 在 CONNECT 阶段完成全部强校验，未预录/错产品密钥/已激活等一律拒绝，缩小探测面。
+func (h *Handler) authBootstrap(c *gin.Context, sn, productKey, password string) {
+	product, err := h.store.GetProductByKey(productKey)
+	if err != nil {
+		log.Printf("mqtt auth(bootstrap): product not found key=%s sn=%s", productKey, sn)
+		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "product not found"})
+		return
+	}
+	if !product.DynRegEnabled {
+		log.Printf("mqtt auth(bootstrap): dynreg disabled key=%s sn=%s", productKey, sn)
+		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "dynamic registration disabled"})
+		return
+	}
+	if !cryptopkg.CheckPassword(product.ProductSecret, password) {
+		log.Printf("mqtt auth(bootstrap): bad product secret key=%s sn=%s", productKey, sn)
+		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "bad product secret"})
+		return
+	}
+	dev, err := h.store.GetDevice(sn)
+	if err != nil {
+		log.Printf("mqtt auth(bootstrap): sn not preregistered key=%s sn=%s", productKey, sn)
+		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "sn not preregistered"})
+		return
+	}
+	if dev.ProductID != product.ID {
+		log.Printf("mqtt auth(bootstrap): product mismatch sn=%s got_product=%d", sn, dev.ProductID)
+		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "product mismatch"})
+		return
+	}
+	if !dev.Enabled {
+		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "device disabled"})
+		return
+	}
+	if dev.DeviceSecret != "" {
+		c.JSON(http.StatusOK, gin.H{"result": "deny", "reason": "already activated"})
+		return
+	}
+	log.Printf("mqtt auth(bootstrap): allow sn=%s product=%s", sn, productKey)
+	c.JSON(http.StatusOK, gin.H{"result": "allow", "is_superuser": false})
+}
+
+// bootstrapACLResult 引导连接仅允许自身 SN 的注册请求(pub)/应答(sub)两个字面主题；
+// 通配符或他人 SN 因字面不等直接 deny（EMQX deny_action=disconnect 会踢线）。
+func (h *Handler) bootstrapACLResult(action, sn, topic string) string {
+	switch action {
+	case "publish":
+		if topic == protocol.TopicRegisterReq(sn) {
+			return "allow"
+		}
+	case "subscribe":
+		if topic == protocol.TopicRegisterResp(sn) {
+			return "allow"
+		}
+	}
+	log.Printf("mqtt acl(bootstrap): deny action=%s sn=%s topic=%s", action, sn, topic)
+	return "deny"
 }

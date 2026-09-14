@@ -10,12 +10,18 @@ import (
 
 	"wendaoiotpannel/internal/evaluate"
 	"wendaoiotpannel/internal/events"
+	"wendaoiotpannel/internal/metrics"
 	"wendaoiotpannel/internal/model"
 	"wendaoiotpannel/internal/protocol"
 	"wendaoiotpannel/internal/store"
+	cryptopkg "wendaoiotpannel/pkg/crypto"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
+
+// dynRegKickGrace 动态注册应答入队到踢掉引导连接之间的投递宽限
+// （QoS1 消息下发 + 设备端处理时间；clean session 设备唯一接收窗口）。
+var dynRegKickGrace = 500 * time.Millisecond
 
 type Client struct {
 	client mqtt.Client
@@ -70,6 +76,7 @@ func (c *Client) Subscribe() error {
 		protocol.TopicOTAProgressSub(): 1,
 		protocol.TopicOTAAckSub():      1,
 		protocol.TopicPeerSub():        1,
+		protocol.TopicRegisterReqSub(): 1,
 		// EMQX 系统事件：实时同步设备上下线（connect 即在线，disconnect 即离线）
 		sysTopicClientConnected:    1,
 		sysTopicClientDisconnected: 1,
@@ -110,6 +117,7 @@ func (c *Client) resubscribe() {
 		protocol.TopicOTAProgressSub(): 1,
 		protocol.TopicOTAAckSub():      1,
 		protocol.TopicPeerSub():        1,
+		protocol.TopicRegisterReqSub(): 1,
 		sysTopicClientConnected:        1,
 		sysTopicClientDisconnected:     1,
 	}
@@ -135,6 +143,13 @@ func (c *Client) onMessage(_ mqtt.Client, msg mqtt.Message) {
 	}
 
 	deviceID := extractDeviceID(topic)
+
+	// 一型一密动态注册：wendao/register/{sn}/req
+	if deviceID == "register" && strings.HasPrefix(topic, "wendao/register/") &&
+		strings.HasSuffix(topic, "/req") {
+		c.handleDynRegister(topic, msg.Payload())
+		return
+	}
 
 	if strings.HasSuffix(topic, "/ota/progress") {
 		c.handleOTAProgress(deviceID, msg.Payload())
@@ -225,6 +240,9 @@ func (c *Client) handleUplink(deviceID string, payload []byte) {
 	if err := c.store.SaveDeviceData(dd); err != nil {
 		log.Printf("mqtt uplink: save device data error: %v", err)
 	}
+
+	// 仪表盘消息流入实时计数（保存成功即计入）
+	metrics.AddIn(dev.TenantID)
 
 	resp.Code = protocol.CodeSuccess
 	resp.Msg = "ok"
@@ -521,6 +539,116 @@ func (c *Client) publishAck(topic string, resp interface{}) {
 	c.client.Publish(topic, 1, false, payload)
 }
 
+// handleDynRegister 一型一密动态注册：引导连接向 wendao/register/{sn}/req 请求激活。
+// 三重一致校验（topic sn / body sn / body product_key）通过后做条件激活：
+// 赢标者下发新签发的一机一密（code=0），并发竞争失败者/已激活回 code=4；
+// 应答入队（QoS1）后踢掉引导连接，设备应保存密钥并以 username=SN 普通重连。
+// 引导连接在 EMQX 认证阶段已做过一轮同款校验，这里按零信任原则复核（消息可能来自异常路径）。
+func (c *Client) handleDynRegister(topic string, payload []byte) {
+	parts := strings.Split(topic, "/")
+	// wendao / register / {sn} / req
+	if len(parts) != 4 {
+		return
+	}
+	topicSN := parts[2]
+
+	// finish 统一收口：应答入队（QoS1）→ 异步预留投递宽限 → 踢掉引导连接。
+	// 所有终态（含参数错/重复激活）都走这里：并发注册时输标者与赢标者共用同一
+	// username（SN&ProductKey），赢标者的踢线会断开全部引导会话，因此 code4 应答
+	// 也必须先获得投递宽限，否则输标设备来不及收到"已激活"原因。
+	// 踢线必须异步：本函数运行在 paho 消息派发路径上，同步 sleep 会阻塞输标请求
+	// 的处理（单连接消息串行派发），导致输标应答晚于赢标踢线而永远发不出去。
+	finish := func(id string, code int, msg, secret, productKey string) {
+		r := protocol.RegisterResp{ID: id, Code: code, Msg: msg, DeviceSecret: secret}
+		b, _ := json.Marshal(r)
+		token := c.client.Publish(protocol.TopicRegisterResp(topicSN), 1, false, b)
+		token.Wait()
+		if err := token.Error(); err != nil {
+			log.Printf("mqtt dynreg: publish reply to %s failed: %v", topicSN, err)
+		}
+		go func() {
+			time.Sleep(dynRegKickGrace)
+			c.kickBootstrap(topicSN, productKey)
+		}()
+	}
+
+	var req protocol.RegisterReq
+	if err := json.Unmarshal(payload, &req); err != nil {
+		log.Printf("mqtt dynreg: invalid JSON (sn=%s): %v", topicSN, err)
+		finish("", protocol.CodeParamError, "bad request", "", "")
+		return
+	}
+	if req.SN != topicSN {
+		log.Printf("mqtt dynreg: sn mismatch topic=%s body=%s", topicSN, req.SN)
+		finish(req.ID, protocol.CodeParamError, "sn mismatch", "", req.ProductKey)
+		return
+	}
+	if !protocol.ProductKeyPattern.MatchString(req.ProductKey) {
+		finish(req.ID, protocol.CodeParamError, "bad product_key", "", req.ProductKey)
+		return
+	}
+	product, err := c.store.GetProductByKey(req.ProductKey)
+	if err != nil || !product.DynRegEnabled {
+		finish(req.ID, protocol.CodeForbidden, "product not found or registration disabled", "", req.ProductKey)
+		return
+	}
+	dev, err := c.store.GetDevice(req.SN)
+	if err != nil || dev.ProductID != product.ID || !dev.Enabled {
+		finish(req.ID, protocol.CodeDeviceNotRegistered, "sn not preregistered to product", "", req.ProductKey)
+		return
+	}
+
+	secret, err := cryptopkg.RandomPassword(20)
+	if err != nil {
+		log.Printf("mqtt dynreg: gen secret failed sn=%s: %v", req.SN, err)
+		finish(req.ID, protocol.CodeParamError, "internal error", "", req.ProductKey)
+		return
+	}
+	won, _, err := c.store.ActivateDevice(req.SN, product.ID, cryptopkg.MustHashPassword(secret))
+	if err != nil {
+		log.Printf("mqtt dynreg: activate sn=%s failed: %v", req.SN, err)
+		finish(req.ID, protocol.CodeParamError, "internal error", "", req.ProductKey)
+		return
+	}
+	if !won {
+		// 并发激活输标，或设备已持有一机一密
+		log.Printf("mqtt dynreg: sn=%s already activated", req.SN)
+		finish(req.ID, protocol.CodeAlreadyActivated, "device already activated", "", req.ProductKey)
+		return
+	}
+
+	log.Printf("mqtt dynreg: activated sn=%s product=%s", req.SN, req.ProductKey)
+	// 通知前端：预录设备已完成动态注册（设备卡片由“待激活”翻转）
+	if c.bus != nil && dev.TenantID != 0 {
+		c.bus.BroadcastToTenant(dev.TenantID, events.Message{
+			Type: "device_activated",
+			Data: map[string]interface{}{
+				"device_id":    req.SN,
+				"product_id":   product.ID,
+				"activated_at": time.Now().UnixMilli(),
+			},
+		})
+	}
+	finish(req.ID, protocol.CodeSuccess, "ok", secret, req.ProductKey)
+}
+
+// kickBootstrap 踢掉某 SN 的引导连接（username="SN&ProductKey"）。
+// 未配置 EMQX REST 时静默跳过（设备可用新密钥重连触发互踢兜底）。
+func (c *Client) kickBootstrap(sn, productKey string) {
+	if c.emqx == nil || !c.emqx.Enabled() {
+		return
+	}
+	bootstrapUsername := sn + protocol.BootstrapSep + productKey
+	kicked, err := c.emqx.KickDeviceSessions(bootstrapUsername)
+	if err != nil {
+		log.Printf("mqtt dynreg: kick bootstrap %s failed: %v", bootstrapUsername, err)
+		return
+	}
+	if len(kicked) > 0 {
+		log.Printf("mqtt dynreg: kicked bootstrap session(s) %s: %v", bootstrapUsername, kicked)
+	}
+}
+
 // handleClientEvent 处理 EMQX $SYS 客户端上下线事件，实时同步设备状态。
 // 主题形如 $SYS/brokers/<node>/clients/<clientid>/connected|disconnected。
 // clientid 由客户端自选（可能带前缀），设备ID以事件 payload 的 username 字段为准；
@@ -545,6 +673,10 @@ func (c *Client) handleClientEvent(topic string, payload []byte) {
 		deviceID = clientID
 	}
 	if deviceID == "" || deviceID == c.cfg.ClientID {
+		return
+	}
+	// 一型一密引导连接（username="SN&ProductKey"）不参与正常设备在线状态
+	if strings.Contains(deviceID, protocol.BootstrapSep) {
 		return
 	}
 

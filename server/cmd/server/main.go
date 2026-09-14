@@ -82,7 +82,7 @@ func main() {
 		ticker := time.NewTicker(scanInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			if err := s.MarkOfflineDevices(offlineTimeout); err != nil {
+			if err := s.MarkOfflineDevices(cfg.Device.OnlineMode, offlineTimeout); err != nil {
 				log.Printf("mark offline devices error: %v", err)
 			}
 		}
@@ -96,7 +96,7 @@ func main() {
 		ticker := time.NewTicker(pingInterval)
 		defer ticker.Stop()
 		for range ticker.C {
-			ids, err := s.ListPingModeDevices()
+			ids, err := s.ListPingModeDevices(cfg.Device.OnlineMode)
 			if err != nil {
 				log.Printf("list ping-mode devices error: %v", err)
 				continue
@@ -140,6 +140,7 @@ func main() {
 	auth := api.Group("", handler.AuthMiddleware(s))
 	{
 		auth.GET("/dashboard/stats", h.GetDashboardStats)
+		auth.GET("/dashboard/traffic", h.GetDashboardTraffic)
 		auth.GET("/projects/:id/data", h.GetProjectData)
 
 		// 租户管理：仅超管（路由级强制）
@@ -151,8 +152,19 @@ func main() {
 		auth.POST("/projects", h.CreateProject)
 		auth.GET("/projects", h.ListProjects)
 		auth.PUT("/projects/:id", h.UpdateProject)
+		auth.PUT("/projects/:id/settings", h.UpdateProjectSettings)
+		auth.POST("/projects/:id/apply-online-default", h.ApplyProjectOnlineDefault)
 		auth.DELETE("/projects/:id", h.DeleteProject)
 
+		// 产品（一型一密）：租户管理员可自助管理本租户产品
+		auth.POST("/products", h.CreateProduct)
+		auth.GET("/products", h.ListProducts)
+		auth.PUT("/products/:key", h.UpdateProduct)
+		auth.DELETE("/products/:key", h.DeleteProduct)
+		auth.POST("/products/:key/secret/reset", h.ResetProductSecret)
+
+		// 一型一密：批量预录 SN（待激活）+ 重新允许动态注册
+		auth.POST("/devices/batch-preregister", h.BatchPreregister)
 		auth.POST("/devices", h.CreateDevice)
 		auth.GET("/devices", h.ListDevices)
 		auth.GET("/devices/:deviceId", h.GetDevice)
@@ -160,6 +172,7 @@ func main() {
 		auth.DELETE("/devices/:deviceId", h.DeleteDevice)
 		auth.PUT("/devices/:deviceId/enabled", h.SetDeviceEnabled)
 		auth.POST("/devices/:deviceId/secret/reset", h.ResetDeviceSecret)
+		auth.POST("/devices/:deviceId/reactivate", h.ReactivateDevice)
 
 		auth.POST("/devices/:deviceId/tags", h.CreateDeviceTag)
 		auth.GET("/devices/:deviceId/tags", h.ListDeviceTags)

@@ -27,6 +27,7 @@ func (s *Store) AutoMigrate() error {
 	return s.db.AutoMigrate(
 		&model.Tenant{},
 		&model.Project{},
+		&model.Product{},
 		&model.Device{},
 		&model.DeviceTag{},
 		&model.ProjectTag{},
@@ -197,6 +198,11 @@ func (s *Store) DeleteTenant(id uint) error {
 		if r := tx.Unscoped().Where("tenant_id = ?", id).Delete(&model.AdminUser{}); r.Error != nil {
 			return r.Error
 		}
+		// 租户的产品（一型一密）在其设备随项目全部清除后删除；
+		// 设备均归属于项目且已在上方级联清除，此处不会再有引用。
+		if r := tx.Unscoped().Where("tenant_id = ?", id).Delete(&model.Product{}); r.Error != nil {
+			return r.Error
+		}
 		if r := tx.Unscoped().Delete(&model.Tenant{}, id); r.Error != nil {
 			return r.Error
 		}
@@ -260,6 +266,27 @@ func (s *Store) ListAllProjects() ([]model.Project, error) {
 
 func (s *Store) UpdateProject(id uint, name string) error {
 	return s.db.Model(&model.Project{}).Where("id = ?", id).Update("name", name).Error
+}
+
+// UpdateProjectSettings 更新项目级在线判定默认（mode 传 ” 表示沿用系统默认）。
+func (s *Store) UpdateProjectSettings(id uint, onlineMode string, offlineTimeoutSec int) error {
+	return s.db.Model(&model.Project{}).Where("id = ?", id).
+		Updates(map[string]interface{}{
+			"online_mode":         onlineMode,
+			"offline_timeout_sec": offlineTimeoutSec,
+		}).Error
+}
+
+// ApplyProjectOnlineDefault 将项目在线判定默认显式写入该项目全部设备
+// （一键应用：此后设备不再动态跟随项目默认，而是各自持有相同的显式值）。返回受影响设备数。
+func (s *Store) ApplyProjectOnlineDefault(projectID uint, onlineMode string, offlineTimeoutSec int) (int64, error) {
+	r := s.db.Model(&model.Device{}).
+		Where("project_id = ?", projectID).
+		Updates(map[string]interface{}{
+			"online_mode":         onlineMode,
+			"offline_timeout_sec": offlineTimeoutSec,
+		})
+	return r.RowsAffected, r.Error
 }
 
 func (s *Store) DeleteProject(id uint) error {
@@ -471,25 +498,64 @@ func (s *Store) ListControlLogs(deviceID string, limit int, offset int) ([]model
 // Stats
 
 type DashboardStats struct {
-	TotalTenants  int64 `json:"total_tenants"`
-	TotalProjects int64 `json:"total_projects"`
-	TotalDevices  int64 `json:"total_devices"`
-	OnlineDevices int64 `json:"online_devices"`
+	TotalTenants    int64 `json:"total_tenants"`
+	TotalProjects   int64 `json:"total_projects"`
+	TotalDevices    int64 `json:"total_devices"`
+	OnlineDevices   int64 `json:"online_devices"`
+	DisabledDevices int64 `json:"disabled_devices"`
+	PendingDevices  int64 `json:"pending_devices"`
+	// 消息量（数据库计数，租户作用域）：24h 与全量
+	MessagesIn24H  int64 `json:"messages_in_24h"`
+	MessagesOut24H int64 `json:"messages_out_24h"`
+	MessagesInAll  int64 `json:"messages_in_total_db"`
+	MessagesOutAll int64 `json:"messages_out_total_db"`
 }
 
 func (s *Store) GetDashboardStats(tenantID *uint) (*DashboardStats, error) {
 	var stats DashboardStats
+	since := time.Now().Add(-24 * time.Hour)
+
 	if tenantID == nil {
 		s.db.Model(&model.Tenant{}).Count(&stats.TotalTenants)
 		s.db.Model(&model.Project{}).Count(&stats.TotalProjects)
 		s.db.Model(&model.Device{}).Count(&stats.TotalDevices)
 		s.db.Model(&model.Device{}).Where("status = ?", model.DeviceStatusOnline).Count(&stats.OnlineDevices)
+		s.db.Model(&model.Device{}).Where("enabled = ?", false).Count(&stats.DisabledDevices)
+		s.db.Model(&model.Device{}).
+			Where("product_id > 0 AND (device_secret = '' OR device_secret IS NULL)").
+			Count(&stats.PendingDevices)
+		s.db.Model(&model.DeviceData{}).Where("ts >= ?", since.UnixMilli()).Count(&stats.MessagesIn24H)
+		s.db.Model(&model.ControlLog{}).Where("created_at >= ?", since).Count(&stats.MessagesOut24H)
+		s.db.Model(&model.DeviceData{}).Count(&stats.MessagesInAll)
+		s.db.Model(&model.ControlLog{}).Count(&stats.MessagesOutAll)
 	} else {
 		var projectIDs []uint
 		s.db.Model(&model.Project{}).Where("tenant_id = ?", *tenantID).Pluck("id", &projectIDs)
 		stats.TotalProjects = int64(len(projectIDs))
-		s.db.Model(&model.Device{}).Where("project_id IN ?", projectIDs).Count(&stats.TotalDevices)
-		s.db.Model(&model.Device{}).Where("project_id IN ? AND status = ?", projectIDs, model.DeviceStatusOnline).Count(&stats.OnlineDevices)
+		if len(projectIDs) > 0 {
+			var deviceIDs []string
+			s.db.Model(&model.Device{}).Where("project_id IN ?", projectIDs).Pluck("id", &deviceIDs)
+			s.db.Model(&model.Device{}).Where("project_id IN ?", projectIDs).Count(&stats.TotalDevices)
+			s.db.Model(&model.Device{}).
+				Where("project_id IN ? AND status = ?", projectIDs, model.DeviceStatusOnline).
+				Count(&stats.OnlineDevices)
+			s.db.Model(&model.Device{}).
+				Where("project_id IN ? AND enabled = ?", projectIDs, false).
+				Count(&stats.DisabledDevices)
+			s.db.Model(&model.Device{}).
+				Where("project_id IN ? AND product_id > 0 AND (device_secret = '' OR device_secret IS NULL)", projectIDs).
+				Count(&stats.PendingDevices)
+			if len(deviceIDs) > 0 {
+				s.db.Model(&model.DeviceData{}).
+					Where("device_id IN ? AND ts >= ?", deviceIDs, since.UnixMilli()).
+					Count(&stats.MessagesIn24H)
+				s.db.Model(&model.ControlLog{}).
+					Where("device_id IN ? AND created_at >= ?", deviceIDs, since).
+					Count(&stats.MessagesOut24H)
+				s.db.Model(&model.DeviceData{}).Where("device_id IN ?", deviceIDs).Count(&stats.MessagesInAll)
+				s.db.Model(&model.ControlLog{}).Where("device_id IN ?", deviceIDs).Count(&stats.MessagesOutAll)
+			}
+		}
 	}
 	return &stats, nil
 }
@@ -619,44 +685,57 @@ func uintsToStrings(ids []uint) []string {
 	return result
 }
 
-// MarkOfflineDevices 离线回收扫描（设备级在线判定感知）。
-// 有效模式 = COALESCE(NULLIF(online_mode, ”), 'connection')：历史空串一律按默认 connection 处理。
+// 三层在线判定继承表达式（设备 -> 项目 -> 系统全局）。
+// 历史 devices.online_mode 空串按 connection 处理的语义保留：项目层也为空时回退到 globalMode。
+// 调用方需保证 globalMode 已在 config 加载时归一为 connection/report/ping。
+const effectiveOnlineModeExpr = "COALESCE(NULLIF(NULLIF(d.online_mode, ''), 'default'), NULLIF(NULLIF(p.online_mode, ''), 'default'), ?)"
+
+// 有效超时（秒）：设备 >0 优先，否则项目 >0，否则 NULL（交由全局超时分支）。
+const effectiveTimeoutExpr = "CASE WHEN d.offline_timeout_sec > 0 THEN d.offline_timeout_sec WHEN p.offline_timeout_sec > 0 THEN p.offline_timeout_sec ELSE NULL END"
+
+// MarkOfflineDevices 离线回收扫描（三层在线判定继承：设备 -> 项目 -> 系统全局）。
 //   - report：超过有效超时未上报(last_active 陈旧)即判离线；
 //   - ping ：超过有效超时未回应 ping(last_active 陈旧)即判离线（连接假死也能检出）；
 //   - connection：纯事件驱动（断开即离线），扫描不触碰。
 //
-// 有效超时 = 设备 offline_timeout_sec(>0) 优先，否则全局 timeout（全局<=0 视为禁用超时，不回收）。
-func (s *Store) MarkOfflineDevices(timeout time.Duration) error {
-	now := time.Now()
-	effMode := "COALESCE(NULLIF(online_mode, ''), 'connection')"
+// 设备/项目均未设超时时沿用全局 timeout；全局 <=0 视为禁用超时，不回收。
+func (s *Store) MarkOfflineDevices(globalMode string, globalTimeout time.Duration) error {
+	joinClause := "devices d LEFT JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL"
+	onlineCond := "d.status = ? AND d.deleted_at IS NULL"
 
-	// ① 自定义超时的 report/ping 设备：按各自 offline_timeout_sec 回收
-	if err := s.db.Model(&model.Device{}).
-		Where("status = ? AND "+effMode+" IN ('report','ping') AND offline_timeout_sec > 0 AND last_active < DATE_SUB(?, INTERVAL offline_timeout_sec SECOND)",
-			model.DeviceStatusOnline, now).
-		Update("status", model.DeviceStatusOffline).Error; err != nil {
+	// ① 设备或项目显式设置了超时：按各行有效秒数回收
+	if err := s.db.
+		Table(joinClause).
+		Where(onlineCond, model.DeviceStatusOnline).
+		Where(effectiveOnlineModeExpr+" IN ('report','ping')", globalMode).
+		Where(effectiveTimeoutExpr+" IS NOT NULL").
+		Where("d.last_active < DATE_SUB(?, INTERVAL "+effectiveTimeoutExpr+" SECOND)", time.Now()).
+		Update("d.status", model.DeviceStatusOffline).Error; err != nil {
 		return err
 	}
 
-	// ② 未自定义超时的 report/ping 设备：沿用全局超时（全局禁用超时时跳过）
-	if timeout > 0 {
-		if err := s.db.Model(&model.Device{}).
-			Where("status = ? AND "+effMode+" IN ('report','ping') AND offline_timeout_sec <= 0 AND last_active < ?",
-				model.DeviceStatusOnline, now.Add(-timeout)).
-			Update("status", model.DeviceStatusOffline).Error; err != nil {
+	// ② 设备/项目均未设超时：沿用全局超时（全局禁用超时时跳过）
+	if globalTimeout > 0 {
+		if err := s.db.Table(joinClause).
+			Where(onlineCond, model.DeviceStatusOnline).
+			Where(effectiveOnlineModeExpr+" IN ('report','ping')", globalMode).
+			Where(effectiveTimeoutExpr+" IS NULL").
+			Where("d.last_active < ?", time.Now().Add(-globalTimeout)).
+			Update("d.status", model.DeviceStatusOffline).Error; err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// ListPingModeDevices 返回有效判定模式为 ping 且已启用的设备 ID 列表（平台探活发送目标）。
+// ListPingModeDevices 返回有效判定模式（三层继承解析后）为 ping 且已启用的设备 ID（平台探活目标）。
 // 包含当前离线设备：ping 到达且设备应答后可经 handlePingAck 恢复在线。
-func (s *Store) ListPingModeDevices() ([]string, error) {
+func (s *Store) ListPingModeDevices(globalMode string) ([]string, error) {
 	var ids []string
-	err := s.db.Model(&model.Device{}).
-		Where("enabled = ? AND COALESCE(NULLIF(online_mode, ''), 'connection') = ?", true, "ping").
-		Pluck("id", &ids).Error
+	err := s.db.Table("devices d LEFT JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL").
+		Where("d.enabled = ? AND d.deleted_at IS NULL", true).
+		Where(effectiveOnlineModeExpr+" = ?", globalMode, "ping").
+		Pluck("d.id", &ids).Error
 	return ids, err
 }
 

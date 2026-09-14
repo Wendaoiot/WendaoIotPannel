@@ -1,16 +1,71 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"regexp"
+	"strings"
+)
 
 const (
 	CodeSuccess             = 0
 	CodeDeviceNotRegistered = 1
 	CodeTagNotConfigured    = 2
 	CodeParamError          = 3
+	CodeAlreadyActivated    = 4 // 一型一密：设备已激活（一机一密已签发）
 	CodeDeviceOffline       = 5 // D2D：目标设备离线
 	CodeForbidden           = 6 // D2D：跨租户且无白名单授权
 	CodePeerNotFound        = 7 // D2D：目标设备不存在
 )
+
+// ===================== 一型一密动态注册 =====================
+
+// BootstrapSep 引导连接用户名分隔符：username = "{SN}&{ProductKey}"。
+// '&' 不在 SN/ProductKey 允许字符集（[A-Za-z0-9_-]）内，与普通设备连接天然不歧义。
+const BootstrapSep = "&"
+
+var (
+	SNPattern         = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	ProductKeyPattern = regexp.MustCompile(`^[A-Za-z0-9]{8,40}$`)
+)
+
+// ParseBootstrapUsername 解析引导连接用户名 "SN&ProductKey"，两段均须符合各自字符规范。
+func ParseBootstrapUsername(username string) (sn, productKey string, ok bool) {
+	if !strings.Contains(username, BootstrapSep) {
+		return "", "", false
+	}
+	parts := strings.SplitN(username, BootstrapSep, 2)
+	sn, productKey = parts[0], parts[1]
+	if !SNPattern.MatchString(sn) || !ProductKeyPattern.MatchString(productKey) {
+		return "", "", false
+	}
+	return sn, productKey, true
+}
+
+// 引导连接仅可使用与其 SN 绑定的两个注册主题（ACL 特判）：
+//
+//	publish   wendao/register/{sn}/req
+//	subscribe wendao/register/{sn}/reply
+func TopicRegisterReq(sn string) string  { return "wendao/register/" + sn + "/req" }
+func TopicRegisterResp(sn string) string { return "wendao/register/" + sn + "/reply" }
+func TopicRegisterReqSub() string        { return "wendao/register/+/req" }
+
+// RegisterReq 设备动态注册请求（引导连接发布到 wendao/register/{sn}/req）。
+type RegisterReq struct {
+	ID         string `json:"id"`          // 消息 id（设备生成，用于关联应答）
+	SN         string `json:"sn"`          // 设备序列号（须等于引导用户名中的 SN）
+	ProductKey string `json:"product_key"` // 产品凭证（须等于引导用户名中的 ProductKey）
+	FwVersion  string `json:"fw_version,omitempty"`
+}
+
+// RegisterResp 平台动态注册应答（wendao/register/{sn}/reply）。
+// code=0 时 device_secret 为新签发的一机一密（仅下发一次）；
+// code=4 表示设备已激活，引导连接将被拒绝/断开，设备应改用一机一密重连。
+type RegisterResp struct {
+	ID           string `json:"id"`
+	Code         int    `json:"code"`
+	Msg          string `json:"msg"`
+	DeviceSecret string `json:"device_secret,omitempty"`
+}
 
 type UplinkRequest struct {
 	ID      string             `json:"id"`
