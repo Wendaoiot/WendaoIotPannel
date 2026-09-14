@@ -18,6 +18,11 @@
         </el-select>
       </div>
       <div class="toolbar-right">
+        <!-- 一型一密「录入设备」入口：后端已上线，前端暂隐；联调收尾后置 true 放开（对话框与逻辑仍保留） -->
+        <el-button v-if="preregisterEnabled" type="success" plain @click="showPreregisterDialog">
+          <el-icon><Connection /></el-icon>
+          录入设备
+        </el-button>
         <el-button type="primary" @click="showCreateDialog">
           <el-icon><Plus /></el-icon>
           新建设备
@@ -28,30 +33,87 @@
     <div v-loading="loading" class="card-grid-wrap">
       <el-row v-if="devices.length" :gutter="16">
         <el-col v-for="dev in devices" :key="dev.id" :xs="24" :sm="12" :md="8" :lg="6">
-          <article class="device-card" role="button" tabindex="0" @click="goDetail(dev)" @keydown.enter="goDetail(dev)">
-            <div class="card-top">
-              <span class="status-dot" :class="dotClass(dev)" :title="statusText(dev)" />
-              <el-tag v-if="modeLabel(dev)" size="small" type="info" effect="plain">{{ modeLabel(dev) }}</el-tag>
-            </div>
-            <div class="card-body">
-              <h3 class="card-name" :title="dev.name">{{ dev.name }}</h3>
-              <p class="card-id mono" :title="dev.id">{{ dev.id }}</p>
-            </div>
-            <div class="card-meta">
-              <span class="meta-item" :title="getProjectName(dev.project_id)">
-                <el-icon><Folder /></el-icon>
-                {{ getProjectName(dev.project_id) }}
-              </span>
-              <span class="meta-item">
-                <el-icon><Clock /></el-icon>
-                {{ relativeActive(dev.last_active) }}
-              </span>
+          <article
+            class="device-card"
+            :class="`is-${deviceState(dev)}`"
+            role="button"
+            tabindex="0"
+            @click="goDetail(dev)"
+            @keydown.enter="goDetail(dev)"
+          >
+            <span class="card-strip" :title="statusText(dev)" />
+            <div class="card-inner">
+              <div class="card-head">
+                <span class="device-avatar"><el-icon><Cpu /></el-icon></span>
+                <!-- 待激活：状态胶囊本身即橙色提示，不重复 tag；已激活产品设备在胶囊左侧放产品名 -->
+                <span v-if="!isPending(dev) && isDynreg(dev)" class="mini-tag tag-product" :title="productName(dev.product_id!)">
+                  {{ productName(dev.product_id!) }}
+                </span>
+                <span class="status-pill">{{ statusText(dev) }}</span>
+              </div>
+              <div class="card-body">
+                <h3 class="card-name" :title="dev.name">{{ dev.name }}</h3>
+                <p class="card-id mono" :title="dev.id">{{ dev.id }}</p>
+              </div>
+              <div class="card-meta">
+                <span class="meta-item" :title="getProjectName(dev.project_id)">
+                  <el-icon><Folder /></el-icon>{{ getProjectName(dev.project_id) }}
+                </span>
+                <span class="meta-item">
+                  <el-icon><Clock /></el-icon>{{ isPending(dev) ? '等待首次上线' : relativeActive(dev.last_active) }}
+                </span>
+                <span v-if="modeLabel(dev)" class="meta-item meta-mode">{{ modeLabel(dev) }}</span>
+              </div>
             </div>
           </article>
         </el-col>
       </el-row>
       <el-empty v-else-if="!loading" description="暂无设备，点击右上角新建" />
     </div>
+
+    <el-dialog v-if="preregisterEnabled" v-model="preregDialogVisible" title="录入设备（一型一密）" width="460px" @closed="resetPreregForm">
+      <el-alert
+        type="info"
+        :closable="false"
+        style="margin-bottom: 16px"
+        title="录入后设备为待激活状态，无需人工分发密钥：设备首次以产品凭证经 mqtts://8883 引导连接时，自动换取一机一密。"
+      />
+      <el-form ref="preregFormRef" :model="preregForm" :rules="preregRules" label-width="80px">
+        <el-form-item label="所属项目" prop="project_id">
+          <el-select v-model="preregForm.project_id" placeholder="请选择项目" style="width: 100%">
+            <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="所属产品" prop="product_key">
+          <el-select
+            v-model="preregForm.product_key"
+            placeholder="请选择产品（同租户）"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="p in filteredProducts"
+              :key="p.product_key"
+              :label="`${p.name}（${p.product_key}）`"
+              :value="p.product_key"
+            />
+          </el-select>
+          <div v-if="preregForm.project_id && filteredProducts.length === 0" class="form-hint">
+            该项目所属租户下还没有产品，
+            <router-link to="/products">前往「产品管理」创建</router-link>
+          </div>
+        </el-form-item>
+        <el-form-item label="SN 码" prop="sn">
+          <el-input v-model="preregForm.sn" placeholder="设备出厂序列号（字母/数字/_/-，≤64，区分大小写）" />
+        </el-form-item>
+        <el-form-item label="设备名称" prop="name">
+          <el-input v-model="preregForm.name" placeholder="选填，留空则与 SN 相同" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="preregDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="preregSubmitting" @click="handlePreregister">录入</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="createDialogVisible" title="新建设备" width="450px" @closed="resetCreateForm">
       <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="80px">
@@ -84,11 +146,12 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { Plus, Folder, Clock } from '@element-plus/icons-vue'
-import { getDevices, createDevice, type Device } from '@/api/device'
+import { Plus, Folder, Clock, Connection } from '@element-plus/icons-vue'
+import { getDevices, createDevice, preregisterDevice, type Device } from '@/api/device'
 import { getProjects, type Project } from '@/api/project'
+import { getProducts, type Product } from '@/api/product'
 import { useAuthStore } from '@/stores/auth'
-import { normalizeOnlineMode, formatTimeoutDuration } from '@/utils/onlineMode'
+import { resolveOnlineMode, formatTimeoutDuration } from '@/utils/onlineMode'
 import { useRealtime } from '@/composables/useRealtime'
 
 const router = useRouter()
@@ -97,9 +160,31 @@ const isTenantAdmin = computed(() => authStore.role === 'tenant_admin')
 const tenantId = computed(() => authStore.tenantId)
 const devices = ref<Device[]>([])
 const projects = ref<Project[]>([])
+const products = ref<Product[]>([])
 const loading = ref(false)
 const submitting = ref(false)
 const filterProjectId = ref<number | undefined>(undefined)
+
+// 一型一密前端入口开关：后端（产品管理/动态注册）已上线，「录入设备」入口暂隐，置 true 即恢复
+const preregisterEnabled = false
+
+// 一型一密：产品设备识别（product_id>0；activated_at 为空=待激活）
+function isDynreg(dev: Device): boolean {
+  return (dev.product_id ?? 0) > 0
+}
+function isPending(dev: Device): boolean {
+  return isDynreg(dev) && !dev.activated_at
+}
+function productName(pid: number): string {
+  return products.value.find(p => p.id === pid)?.name || `产品${pid}`
+}
+
+// 卡片统一状态：disabled > pending > online > offline（驱动色条/头像配色）
+function deviceState(dev: Device): 'disabled' | 'pending' | 'online' | 'offline' {
+  if (dev.enabled === false || dev.status === 2) return 'disabled'
+  if (isPending(dev)) return 'pending'
+  return dev.status === 1 ? 'online' : 'offline'
+}
 
 const createDialogVisible = ref(false)
 const createFormRef = ref<FormInstance>()
@@ -114,6 +199,34 @@ const createRules: FormRules = {
   name: [{ required: true, message: '请输入设备名称', trigger: 'blur' }]
 }
 
+// ---- 一型一密：单设备录入 ----
+const preregDialogVisible = ref(false)
+const preregSubmitting = ref(false)
+const preregFormRef = ref<FormInstance>()
+const preregForm = reactive({
+  project_id: undefined as number | undefined,
+  product_key: '',
+  sn: '',
+  name: ''
+})
+const snPattern = /^[A-Za-z0-9_-]{1,64}$/
+const preregRules: FormRules = {
+  project_id: [{ required: true, message: '请选择项目', trigger: 'change' }],
+  product_key: [{ required: true, message: '请选择产品', trigger: 'change' }],
+  sn: [
+    { required: true, message: '请输入 SN 码', trigger: 'blur' },
+    { pattern: snPattern, message: '1-64 位字母/数字/下划线/短横线，区分大小写', trigger: 'blur' }
+  ]
+}
+
+// 产品下拉只列所选项目同租户的产品（产品与项目须同租户）
+const filteredProducts = computed<Product[]>(() => {
+  if (preregForm.project_id === undefined) return []
+  const proj = projects.value.find(p => p.id === preregForm.project_id)
+  if (!proj) return []
+  return products.value.filter(p => p.tenant_id === proj.tenant_id)
+})
+
 function getProjectName(pid: number): string {
   const p = projects.value.find(item => item.id === pid)
   return p?.name || `项目${pid}`
@@ -121,19 +234,18 @@ function getProjectName(pid: number): string {
 
 function statusText(dev: Device): string {
   if (dev.enabled === false || dev.status === 2) return '已禁用'
+  if (isPending(dev)) return '待激活'
   return dev.status === 1 ? '在线' : '离线'
 }
 
-function dotClass(dev: Device): string {
-  if (dev.enabled === false || dev.status === 2) return 'dot-disabled'
-  return dev.status === 1 ? 'dot-online' : 'dot-offline'
-}
-
 function modeLabel(dev: Device): string {
-  // 默认「仅按连接」不在卡片上重复展示，仅标注非默认判定方式
-  const mode = normalizeOnlineMode(dev.online_mode)
+  // 生效模式 = 设备显式覆盖 -> 项目默认 -> 系统(connection)；仅按连接不在卡片重复展示
+  const proj = projects.value.find(p => p.id === dev.project_id)
+  const mode = resolveOnlineMode(dev.online_mode, proj?.online_mode)
   if (mode === 'connection') return ''
-  const t = dev.offline_timeout_sec || 0
+  const devTimeout = dev.offline_timeout_sec ?? 0
+  const projTimeout = proj?.offline_timeout_sec ?? 0
+  const t: number = devTimeout > 0 ? devTimeout : projTimeout
   const label = mode === 'report' ? '按上报时间' : '按应答信号'
   return t > 0 ? `${label} · 时限${formatTimeoutDuration(t)}` : label
 }
@@ -165,6 +277,57 @@ async function fetchProjects() {
     const res = await getProjects(isTenantAdmin.value ? tenantId.value : undefined)
     projects.value = res.data || []
   } catch {
+  }
+}
+
+async function fetchProducts() {
+  try {
+    const res = await getProducts(isTenantAdmin.value ? tenantId.value : undefined)
+    products.value = res.data || []
+  } catch {
+  }
+}
+
+function showPreregisterDialog() {
+  preregForm.project_id = filterProjectId.value
+  preregDialogVisible.value = true
+}
+
+function resetPreregForm() {
+  preregForm.project_id = undefined
+  preregForm.product_key = ''
+  preregForm.sn = ''
+  preregForm.name = ''
+  preregFormRef.value?.resetFields()
+}
+
+async function handlePreregister() {
+  const valid = await preregFormRef.value?.validate().catch(() => false)
+  if (!valid) return
+  preregSubmitting.value = true
+  try {
+    const res = await preregisterDevice({
+      product_key: preregForm.product_key,
+      project_id: preregForm.project_id!,
+      sn: preregForm.sn.trim(),
+      name: preregForm.name.trim()
+    })
+    const row = res.data.results[0]
+    if (!row?.ok) {
+      // 逐行业务失败（SN 已存在等）：保留对话框便于修改
+      ElMessage.error(row?.msg || '录入失败')
+      return
+    }
+    preregDialogVisible.value = false
+    await ElMessageBox.alert(
+      `设备 <b>${row.id}</b> 已预录（待激活）。<br/>设备首次使用产品凭证连接 mqtts://8883 时将自动激活，无需人工分发密钥。`,
+      '录入成功',
+      { dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'success' }
+    ).catch(() => undefined)
+    fetchDevices()
+  } catch {
+  } finally {
+    preregSubmitting.value = false
   }
 }
 
@@ -221,14 +384,28 @@ let offRealtime: (() => void) | null = null
 
 onMounted(() => {
   fetchProjects()
+  fetchProducts()
   fetchDevices()
   offRealtime = onMessage((msg) => {
-    if (msg.type !== 'device_status') return
     const id = String(msg.data?.device_id ?? '')
-    const online = Boolean(msg.data?.online)
     const idx = devices.value.findIndex(d => d.id === id)
+    if (idx >= 0 && msg.type === 'device_activated') {
+      // 一型一密动态注册完成：待激活 → 已激活
+      const cur = devices.value[idx]
+      devices.value[idx] = {
+        ...cur,
+        product_id: Number(msg.data?.product_id ?? cur.product_id ?? 0),
+        activated_at: msg.data?.activated_at
+          ? new Date(Number(msg.data.activated_at)).toISOString()
+          : cur.activated_at
+      }
+      return
+    }
+    if (msg.type !== 'device_status') return
+    const online = Boolean(msg.data?.online)
     if (idx >= 0) {
       const cur = devices.value[idx]
+      if (isPending(cur)) return // 待激活设备不可能有真实连接事件，忽略
       if (msg.data?.enabled === false) {
         devices.value[idx] = { ...cur, enabled: false, status: 2 }
       } else if (online) {
@@ -255,14 +432,17 @@ onUnmounted(() => {
   row-gap: 16px;
 }
 
+/* ===== 设备卡片：左侧状态色条 + 图标头像 + 状态胶囊，信息紧凑无空白 ===== */
 .device-card {
+  position: relative;
   height: 100%;
-  padding: 16px;
+  min-height: 150px;
   background: var(--wd-surface);
   border: 1px solid var(--wd-border);
   border-radius: var(--wd-radius-lg);
   box-shadow: var(--wd-shadow-sm);
   cursor: pointer;
+  overflow: hidden;
   transition: box-shadow var(--wd-dur) var(--wd-ease), transform var(--wd-dur) var(--wd-ease), border-color var(--wd-dur) var(--wd-ease);
   outline: none;
 }
@@ -274,42 +454,96 @@ onUnmounted(() => {
   box-shadow: var(--wd-shadow-md);
 }
 
-.card-top {
+.card-strip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--wd-text-placeholder);
+}
+
+.is-online .card-strip { background: var(--wd-success); }
+.is-disabled .card-strip { background: var(--wd-danger); }
+.is-pending .card-strip { background: var(--wd-warning); }
+
+.card-inner {
+  padding: 14px 14px 12px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+}
+
+.card-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
+  gap: 8px;
 }
 
-.status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+.device-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
   flex-shrink: 0;
+  color: var(--wd-text-secondary);
+  background: var(--wd-border-lighter);
 }
 
-.dot-online {
-  background: var(--wd-success);
-  box-shadow: 0 0 0 3px var(--wd-success-bg);
+.is-online .device-avatar { color: var(--wd-success); background: var(--wd-success-bg); }
+.is-disabled .device-avatar { color: var(--wd-danger); background: var(--wd-danger-bg); }
+.is-pending .device-avatar { color: var(--wd-warning); background: var(--wd-warning-bg); }
+
+.status-pill {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--wd-text-secondary);
+  background: var(--wd-border-lighter);
+  white-space: nowrap;
 }
 
-.dot-offline {
-  background: var(--wd-text-placeholder);
-  box-shadow: 0 0 0 3px var(--wd-border-lighter);
+.is-online .status-pill { color: var(--wd-success); background: var(--wd-success-bg); }
+.is-disabled .status-pill { color: var(--wd-danger); background: var(--wd-danger-bg); }
+.is-pending .status-pill { color: var(--wd-warning); background: var(--wd-warning-bg); }
+
+.mini-tag {
+  flex-shrink: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.dot-disabled {
-  background: var(--wd-danger);
-  box-shadow: 0 0 0 3px var(--wd-danger-bg);
+.tag-pending {
+  color: var(--wd-warning);
+  background: var(--wd-warning-bg);
+  font-weight: 600;
+}
+
+.tag-product {
+  color: var(--wd-success);
+  background: var(--wd-success-bg);
 }
 
 .card-body {
-  margin-bottom: 14px;
+  min-width: 0;
 }
 
 .card-name {
-  margin: 0 0 6px;
-  font-size: 16px;
+  margin: 0 0 3px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--wd-text-primary);
   overflow: hidden;
@@ -331,17 +565,20 @@ onUnmounted(() => {
 }
 
 .card-meta {
+  margin-top: auto;
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding-top: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding-top: 10px;
   border-top: 1px solid var(--wd-border-lighter);
 }
 
 .meta-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  max-width: 100%;
   min-width: 0;
   font-size: 12px;
   color: var(--wd-text-secondary);
@@ -352,5 +589,20 @@ onUnmounted(() => {
 
 .meta-item .el-icon {
   flex-shrink: 0;
+}
+
+.meta-mode {
+  color: var(--wd-primary);
+}
+
+.form-hint {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--wd-text-secondary);
+}
+
+.form-hint a {
+  color: var(--wd-primary);
 }
 </style>

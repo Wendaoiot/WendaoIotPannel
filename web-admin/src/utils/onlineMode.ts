@@ -15,6 +15,25 @@ export function normalizeOnlineMode(mode?: string | null): OnlineModeValue {
   return mode === 'report' || mode === 'ping' ? mode : 'connection'
 }
 
+/** 判断是否为三种有效显式模式（空串/未知值不算）。 */
+export function isExplicitMode(mode?: string | null): mode is OnlineModeValue {
+  return mode === 'connection' || mode === 'report' || mode === 'ping'
+}
+
+/**
+ * 三层继承解析设备实际生效的在线判定模式：设备显式值 -> 项目默认 -> 系统默认。
+ * 任一层为空串/'default'/未知值即回退到下一层。
+ */
+export function resolveOnlineMode(
+  deviceMode?: string | null,
+  projectMode?: string | null,
+  systemMode: OnlineModeValue = 'connection'
+): OnlineModeValue {
+  if (isExplicitMode(deviceMode)) return deviceMode
+  if (isExplicitMode(projectMode)) return projectMode
+  return isExplicitMode(systemMode) ? systemMode : 'connection'
+}
+
 export function onlineModeLabel(mode?: string | null): string {
   return ONLINE_MODES.find(item => item.value === normalizeOnlineMode(mode))?.label ?? '仅按连接'
 }
@@ -42,4 +61,26 @@ export function onlineModeText(mode?: string | null, timeoutSec = 0): string {
     return `${base} · 时限${formatTimeoutDuration(timeoutSec)}`
   }
   return base
+}
+
+/**
+ * 三层继承后的完整生效文案（设备设置页用）：
+ * 设备未显式设置时展示其跟随来源（项目默认/系统默认）与解析后的模式、时限。
+ */
+export function effectiveOnlineModeText(
+  deviceMode?: string | null,
+  deviceTimeoutSec = 0,
+  projectMode?: string | null,
+  projectTimeoutSec = 0,
+  systemTimeoutSec = 0
+): string {
+  if (isExplicitMode(deviceMode)) {
+    const t = deviceTimeoutSec > 0 ? deviceTimeoutSec : (isExplicitMode(projectMode) && projectTimeoutSec > 0 ? projectTimeoutSec : systemTimeoutSec)
+    return onlineModeText(deviceMode, t)
+  }
+  if (isExplicitMode(projectMode)) {
+    const t = projectTimeoutSec > 0 ? projectTimeoutSec : systemTimeoutSec
+    return `跟随项目默认（${onlineModeText(projectMode, t)}）`
+  }
+  return '跟随系统默认'
 }

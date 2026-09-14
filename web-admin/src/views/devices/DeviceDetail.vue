@@ -4,7 +4,6 @@
     <section class="detail-shell">
       <div class="detail-top" v-loading="loading">
         <div class="detail-head">
-          <el-button class="back-btn" circle :icon="ArrowLeft" @click="goBack" />
           <div class="header-main">
             <template v-if="device">
               <div class="header-title">
@@ -46,7 +45,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft } from '@element-plus/icons-vue'
 import { getDevice, type Device } from '@/api/device'
 import { getProjects, type Project } from '@/api/project'
 import { useAuthStore } from '@/stores/auth'
@@ -129,11 +127,6 @@ async function fetchProjects() {
   }
 }
 
-function goBack() {
-  // 确定性返回设备列表，避免 router.back() 踩 tab 历史栈
-  router.push('/devices')
-}
-
 // WS 实时刷新在线状态圆点
 let offRealtime: (() => void) | null = null
 onMounted(() => {
@@ -179,12 +172,6 @@ watch(deviceId, fetchDevice)
   align-items: center;
   gap: 16px;
   padding: 16px 20px 8px;
-}
-
-.back-btn {
-  flex-shrink: 0;
-  border-color: var(--wd-border);
-  color: var(--wd-text-regular);
 }
 
 .header-main {

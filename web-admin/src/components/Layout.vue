@@ -25,6 +25,10 @@
           <el-icon><FolderOpened /></el-icon>
           <span>项目管理</span>
         </el-menu-item>
+        <el-menu-item index="/products">
+          <el-icon><Goods /></el-icon>
+          <span>产品管理</span>
+        </el-menu-item>
         <el-menu-item index="/devices">
           <el-icon><Cpu /></el-icon>
           <span>设备管理</span>
@@ -47,6 +51,15 @@
     <el-container>
       <el-header class="layout-header">
         <div class="header-left">
+          <el-tooltip v-if="backPath" :content="backLabel" placement="bottom" effect="light">
+            <el-button
+              circle
+              class="header-back"
+              @click="router.push(backPath)"
+            >
+              <el-icon><ArrowLeft /></el-icon>
+            </el-button>
+          </el-tooltip>
           <span class="header-title">{{ pageTitle }}</span>
         </div>
         <div class="header-right">
@@ -97,6 +110,7 @@ onUnmounted(disconnect)
 const activeMenu = computed(() => {
   const path = route.path
   if (path.startsWith('/projects')) return '/projects'
+  if (path.startsWith('/products')) return '/products'
   if (path.startsWith('/devices')) return '/devices'
   if (path.startsWith('/firmwares')) return '/firmwares'
   if (path.startsWith('/ota')) return '/ota'
@@ -108,6 +122,10 @@ const activeMenu = computed(() => {
 const pageTitle = computed(() => {
   return (route.meta?.title as string) || 'Wendao IoT Platform'
 })
+
+// 详情/设置页在导航栏最左侧（标题前）提供统一返回入口（路由 meta.back 指定目标）
+const backPath = computed(() => (route.meta?.back as string) || '')
+const backLabel = computed(() => (route.meta?.backLabel as string) || '返回')
 
 async function handleLogout() {
   try {
@@ -174,10 +192,17 @@ async function handleLogout() {
 .header-left {
   font-size: 16px;
   font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .header-title {
   color: var(--wd-text-primary);
+}
+
+.header-back {
+  flex: none;
 }
 
 .logout-text {
@@ -187,6 +212,7 @@ async function handleLogout() {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 14px;
 }
 
 .user-dropdown {

@@ -27,8 +27,12 @@
         </el-form-item>
         <el-form-item label="在线判定">
           <el-radio-group v-model="form.onlineMode" class="mode-radios">
+            <el-radio value="" border>跟随项目默认</el-radio>
             <el-radio v-for="m in ONLINE_MODES" :key="m.value" :value="m.value" border>{{ m.label }}</el-radio>
           </el-radio-group>
+          <div v-if="form.onlineMode === ''" class="field-hint effective-hint">
+            当前项目默认：{{ projectDefaultText }}
+          </div>
         </el-form-item>
         <el-form-item v-if="form.onlineMode === 'report' || form.onlineMode === 'ping'" label="判定离线时限">
           <div class="timeout-box">
@@ -46,7 +50,7 @@
               {{ form.onlineMode === 'report'
                 ? '设备连接 broker 即在线；超过此时长未上报任何数据则判离线（设备保持连接也会判离线）。'
                 : '平台周期性发送探活，设备须回应答信号；超过此时长未收到应答则判离线。需要设备固件支持 ping 应答（常供电设备适用，休眠设备不适用）。' }}
-              全为 0 表示沿用全局时限；最长 7 天。
+              全为 0 表示沿用项目/系统默认时限；最长 7 天。
             </span>
           </div>
         </el-form-item>
@@ -61,14 +65,29 @@
     <section class="panel danger-panel">
       <h3 class="panel-title danger-title">危险操作</h3>
       <div class="danger-actions">
-        <div class="danger-item">
+        <!-- 一型一密设备：不能人工分发密钥，只能回到待激活让设备重新引导注册 -->
+        <div v-if="isDynreg" class="danger-item">
+          <div class="danger-text">
+            <b>重新允许动态注册</b>
+            <span>清空当前一机一密，设备回到待激活状态；旧密钥立即失效，设备须用产品凭证重新引导连接。</span>
+          </div>
+          <el-button
+            type="warning"
+            plain
+            :disabled="isPending"
+            :title="isPending ? '设备尚未激活' : ''"
+            @click="handleReactivate"
+          >重置激活</el-button>
+        </div>
+        <!-- 传统一机一密设备：人工重置接入密钥 -->
+        <div v-else class="danger-item">
           <div class="danger-text">
             <b>重置接入密钥</b>
             <span>旧密钥立即失效，新密钥仅显示一次，需更新到设备端。</span>
           </div>
           <el-button type="warning" plain @click="resetSecret">重置密钥</el-button>
         </div>
-        <el-divider />
+        <el-divider v-if="isDynreg" />
         <div class="danger-item">
           <div class="danger-text">
             <b>删除设备</b>
@@ -85,10 +104,10 @@
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getDevice, updateDevice, deleteDevice, setDeviceEnabled, resetDeviceSecret, type Device } from '@/api/device'
+import { getDevice, updateDevice, deleteDevice, setDeviceEnabled, resetDeviceSecret, reactivateDevice, type Device } from '@/api/device'
 import { getProjects, type Project } from '@/api/project'
 import { useAuthStore } from '@/stores/auth'
-import { ONLINE_MODES, normalizeOnlineMode, type OnlineModeValue } from '@/utils/onlineMode'
+import { ONLINE_MODES, onlineModeText, type OnlineModeValue } from '@/utils/onlineMode'
 
 const route = useRoute()
 const router = useRouter()
@@ -102,11 +121,15 @@ const projects = ref<Project[]>([])
 const loading = ref(false)
 const saving = ref(false)
 
+// 一型一密产品设备（product_id>0）
+const isDynreg = computed(() => (device.value?.product_id ?? 0) > 0)
+const isPending = computed(() => isDynreg.value && !device.value?.activated_at)
+
 // 基本信息 + 在线判定统一表单
-const form = reactive<{ name: string; projectId: number; onlineMode: OnlineModeValue }>({
+const form = reactive<{ name: string; projectId: number; onlineMode: OnlineModeValue | '' }>({
   name: '',
   projectId: 1,
-  onlineMode: 'connection'
+  onlineMode: ''
 })
 const snapshot = ref('')
 // 时限（天/时/分/秒）——与秒互转
@@ -157,7 +180,7 @@ async function fetchProjects() {
 function syncForms(d: Device | null) {
   form.name = d?.name || ''
   form.projectId = d?.project_id || 0
-  form.onlineMode = normalizeOnlineMode(d?.online_mode)
+  form.onlineMode = (d?.online_mode || '') as OnlineModeValue | ''
   snapshot.value = JSON.stringify({ n: form.name, p: form.projectId, m: form.onlineMode })
 
   Object.assign(timeout, secToParts(d?.offline_timeout_sec || 0))
@@ -167,9 +190,17 @@ function syncForms(d: Device | null) {
 function resetForm() {
   form.name = device.value?.name || ''
   form.projectId = device.value?.project_id || 0
-  form.onlineMode = normalizeOnlineMode(device.value?.online_mode)
+  form.onlineMode = (device.value?.online_mode || '') as OnlineModeValue | ''
   Object.assign(timeout, secToParts(device.value?.offline_timeout_sec || 0))
 }
+
+// 当前所选项目的在线判定默认文案（设备选择“跟随项目默认”时展示）
+const projectDefaultText = computed(() => {
+  const p = projects.value.find(item => item.id === form.projectId)
+  if (!p) return '—'
+  if (!p.online_mode) return '跟随系统默认'
+  return onlineModeText(p.online_mode, p.offline_timeout_sec)
+})
 
 async function save() {
   if (!device.value || !form.name.trim()) {
@@ -181,7 +212,7 @@ async function save() {
     ElMessage.warning('时限最长为 7 天')
     return
   }
-  const timeoutSec = form.onlineMode === 'connection' ? 0 : sec
+  const timeoutSec = form.onlineMode === 'report' || form.onlineMode === 'ping' ? sec : 0
   saving.value = true
   try {
     await updateDevice(device.value.id, {
@@ -242,6 +273,26 @@ async function resetSecret() {
       '新接入凭证',
       { dangerouslyUseHTMLString: true, confirmButtonText: '我已保存', type: 'warning' }
     )
+  } catch {
+    /* 拦截器已提示 */
+  }
+}
+
+async function handleReactivate() {
+  if (!device.value) return
+  try {
+    await ElMessageBox.confirm(
+      `设备 ${device.value.name} (${device.value.id}) 当前一机一密将被清空并回到待激活状态，在线连接会被断开。设备需用产品凭证重新引导注册，确定继续？`,
+      '重置动态注册',
+      { type: 'warning', confirmButtonText: '重置激活' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await reactivateDevice(device.value.id)
+    ElMessage.success('已回到待激活状态，等待设备重新引导注册')
+    fetchDevice()
   } catch {
     /* 拦截器已提示 */
   }
@@ -339,6 +390,11 @@ watch(deviceId, fetchDevice)
   font-size: 12px;
   color: var(--wd-text-secondary);
   line-height: 1.6;
+}
+.effective-hint {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
 }
 
 .danger-panel {

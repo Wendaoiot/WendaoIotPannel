@@ -11,9 +11,27 @@ export interface Device {
   online_mode?: string
   /** 判定离线时限（秒），0=沿用全局时限；connection 下不使用，上限 604800 */
   offline_timeout_sec?: number
+  /** 一型一密：所属产品 ID；0/缺省=传统一机一密设备 */
+  product_id?: number
+  /** 一型一密：动态注册激活时间；null=已预录待激活 */
+  activated_at?: string | null
   first_ts: number
   last_active: string | null
   created_at: string
+}
+
+/** 单条/批量预录的逐行结果（成功行无 msg 字段） */
+export interface PreregisterRow {
+  id: string
+  ok: boolean
+  msg?: string
+}
+
+export interface PreregisterResult {
+  total: number
+  succeeded: number
+  failed: number
+  results: PreregisterRow[]
 }
 
 export interface DeviceTag {
@@ -96,6 +114,26 @@ export function getDevice(deviceId: string): Promise<{ code: number; msg: string
 
 export function createDevice(data: { id: string; project_id: number; name: string }): Promise<{ code: number; msg: string; data: { device: Device; device_secret: string; secret_note: string } }> {
   return http.post('/devices', data)
+}
+
+// 一型一密：预录一台待激活设备（后端批量接口传单条）。
+// 返回逐行结果：ok=true 待首次 mqtts 引导连接动态注册激活；ok=false 时 msg 为失败原因。
+export function preregisterDevice(data: {
+  product_key: string
+  project_id: number
+  sn: string
+  name?: string
+}): Promise<{ code: number; msg: string; data: PreregisterResult }> {
+  return http.post('/devices/batch-preregister', {
+    product_key: data.product_key,
+    project_id: data.project_id,
+    items: [{ id: data.sn, name: data.name || '' }]
+  })
+}
+
+// 一型一密：清空一机一密，设备回到待激活（产品凭证重新引导注册）。
+export function reactivateDevice(deviceId: string): Promise<{ code: number; msg: string; data: { id: string; activated: boolean } }> {
+  return http.post(`/devices/${deviceId}/reactivate`, {})
 }
 
 export function updateDevice(

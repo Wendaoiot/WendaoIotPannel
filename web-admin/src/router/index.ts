@@ -37,8 +37,19 @@ const router = createRouter({
         {
           path: 'projects/:projectId/tags',
           name: 'ProjectTags',
-          component: () => import('@/views/projects/ProjectTags.vue'),
-          meta: { title: '项目标签' }
+          redirect: to => ({ path: `/projects/${to.params.projectId}/settings`, query: { tab: 'dictionary' } })
+        },
+        {
+          path: 'projects/:projectId/settings',
+          name: 'ProjectSettings',
+          component: () => import('@/views/projects/ProjectSettings.vue'),
+          meta: { title: '项目设置', back: '/projects', backLabel: '返回项目管理' }
+        },
+        {
+          path: 'products',
+          name: 'Products',
+          component: () => import('@/views/products/ProductList.vue'),
+          meta: { title: '产品管理' }
         },
         {
           path: 'devices',
@@ -51,7 +62,7 @@ const router = createRouter({
           path: 'devices/:deviceId',
           name: 'DeviceDetail',
           component: () => import('@/views/devices/DeviceDetail.vue'),
-          meta: { title: '设备详情' },
+          meta: { title: '设备详情', back: '/devices', backLabel: '返回设备管理' },
           children: [
             {
               path: '',

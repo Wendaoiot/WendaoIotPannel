@@ -36,11 +36,13 @@
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="创建时间" width="180" align="center" />
-        <el-table-column label="操作" width="240" align="center" fixed="right">
+        <el-table-column label="操作" width="250" align="center" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="primary" @click="showEditDialog(row)">编辑</el-button>
             <el-button size="small" type="danger" @click="handleDelete(row)">删除</el-button>
-            <el-button size="small" type="warning" @click="goToTags(row)">标签</el-button>
+            <el-button size="small" type="warning" @click="goToSettings(row)">
+              <el-icon><Setting /></el-icon>&nbsp;设置
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -221,8 +223,8 @@ async function handleDelete(row: Project) {
   }
 }
 
-function goToTags(row: Project) {
-  router.push(`/projects/${row.id}/tags`)
+function goToSettings(row: Project) {
+  router.push(`/projects/${row.id}/settings`)
 }
 
 onMounted(() => {
