@@ -139,6 +139,10 @@ func main() {
 
 	auth := api.Group("", handler.AuthMiddleware(s))
 	{
+		// 当前登录账号的界面偏好（每账号各自保存，/me/preferences）
+		auth.GET("/me/preferences", h.GetMyPreferences)
+		auth.PUT("/me/preferences", h.UpdateMyPreferences)
+
 		auth.GET("/dashboard/stats", h.GetDashboardStats)
 		auth.GET("/dashboard/traffic", h.GetDashboardTraffic)
 		auth.GET("/projects/:id/data", h.GetProjectData)
@@ -151,6 +155,7 @@ func main() {
 
 		auth.POST("/projects", h.CreateProject)
 		auth.GET("/projects", h.ListProjects)
+		auth.GET("/projects/device-stats", h.GetProjectDeviceStats)
 		auth.PUT("/projects/:id", h.UpdateProject)
 		auth.PUT("/projects/:id/settings", h.UpdateProjectSettings)
 		auth.POST("/projects/:id/apply-online-default", h.ApplyProjectOnlineDefault)
@@ -167,6 +172,7 @@ func main() {
 		auth.POST("/devices/batch-preregister", h.BatchPreregister)
 		auth.POST("/devices", h.CreateDevice)
 		auth.GET("/devices", h.ListDevices)
+		auth.GET("/devices/page", h.ListDevicesPage)
 		auth.GET("/devices/:deviceId", h.GetDevice)
 		auth.PUT("/devices/:deviceId", h.UpdateDevice)
 		auth.DELETE("/devices/:deviceId", h.DeleteDevice)

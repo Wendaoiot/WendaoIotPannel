@@ -25,10 +25,6 @@
           <el-icon><FolderOpened /></el-icon>
           <span>项目管理</span>
         </el-menu-item>
-        <el-menu-item index="/products">
-          <el-icon><Goods /></el-icon>
-          <span>产品管理</span>
-        </el-menu-item>
         <el-menu-item index="/devices">
           <el-icon><Cpu /></el-icon>
           <span>设备管理</span>
@@ -96,6 +92,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { useRealtime } from '@/composables/useRealtime'
+import { useUIPrefs } from '@/composables/useUIPrefs'
 
 const router = useRouter()
 const route = useRoute()
@@ -104,13 +101,18 @@ const authStore = useAuthStore()
 const isSuperAdmin = computed(() => authStore.role === 'super_admin')
 
 const { connect, disconnect } = useRealtime()
-onMounted(connect)
+const { loadPrefs } = useUIPrefs()
+onMounted(() => {
+  loadPrefs(true) // 每次登录加载当前账号的服务器持久化偏好
+  connect()
+})
 onUnmounted(disconnect)
 
 const activeMenu = computed(() => {
   const path = route.path
+  // 项目内设备列表属于“设备管理”导航范畴
+  if (/^\/projects\/\d+\/devices(\/|$)/.test(path)) return '/devices'
   if (path.startsWith('/projects')) return '/projects'
-  if (path.startsWith('/products')) return '/products'
   if (path.startsWith('/devices')) return '/devices'
   if (path.startsWith('/firmwares')) return '/firmwares'
   if (path.startsWith('/ota')) return '/ota'

@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -362,6 +363,116 @@ func (s *Store) ListDevicesByProjects(projectIDs []uint) ([]model.Device, error)
 	}
 	err := s.db.Where("project_id IN ?", projectIDs).Find(&devices).Error
 	return devices, err
+}
+
+// DevicePageFilter 设备分页检索条件（千台规模）。
+// ProjectIDs 为租户作用域：nil=超管全部；单条 ProjectID 为项目内页；Keyword 同时模糊匹配 SN(id) 与名称；
+// Status 取值 online/offline/disabled/pending。
+type DevicePageFilter struct {
+	ProjectIDs []uint
+	ProjectID  uint
+	Keyword    string
+	Status     string
+	Page       int
+	PageSize   int
+}
+
+// DevicePageResult 分页结果。
+type DevicePageResult struct {
+	Total    int64          `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"page_size"`
+	Items    []model.Device `json:"items"`
+}
+
+// buildDevicePageQuery 构造带租户作用域/项目/关键字/状态过滤的设备查询（不排序不分页），Count 与 Find 共用。
+func (s *Store) buildDevicePageQuery(f DevicePageFilter) *gorm.DB {
+	q := s.db.Model(&model.Device{})
+	if len(f.ProjectIDs) > 0 {
+		q = q.Where("project_id IN ?", f.ProjectIDs)
+	}
+	if f.ProjectID > 0 {
+		q = q.Where("project_id = ?", f.ProjectID)
+	}
+	if kw := strings.TrimSpace(f.Keyword); kw != "" {
+		like := "%" + strings.ToLower(kw) + "%"
+		// id 列为 utf8mb4_bin（大小写敏感），统一 LOWER 后再 LIKE；keyword 已转小写。
+		q = q.Where("LOWER(id) LIKE ? OR LOWER(name) LIKE ?", like, like)
+	}
+	pendingCond := "product_id > 0 AND (device_secret = '' OR device_secret IS NULL)"
+	switch f.Status {
+	case "online":
+		q = q.Where("enabled = ? AND status = ? AND NOT ("+pendingCond+")", true, model.DeviceStatusOnline)
+	case "offline":
+		q = q.Where("enabled = ? AND status <> ? AND NOT ("+pendingCond+")", true, model.DeviceStatusOnline)
+	case "disabled":
+		q = q.Where("enabled = ?", false)
+	case "pending":
+		q = q.Where(pendingCond)
+	}
+	return q
+}
+
+// ListDevicesPage 分页检索设备。默认排序：在线优先 -> 最近活跃(last_active DESC，NULL 最后) -> SN。
+// 该默认排序服务"先看在线、再按最新上传"的运维直觉，且不开放任意排序字段（防注入）。
+func (s *Store) ListDevicesPage(f DevicePageFilter) (*DevicePageResult, error) {
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.PageSize <= 0 {
+		f.PageSize = 24
+	}
+	q := s.buildDevicePageQuery(f)
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, err
+	}
+
+	var items []model.Device
+	err := s.buildDevicePageQuery(f).
+		Order("enabled DESC").
+		Order(fmt.Sprintf("CASE WHEN status = %d THEN 0 ELSE 1 END", model.DeviceStatusOnline)).
+		Order("last_active IS NULL").
+		Order("last_active DESC").
+		Order("id ASC").
+		Limit(f.PageSize).
+		Offset((f.Page - 1) * f.PageSize).
+		Find(&items).Error
+	if err != nil {
+		return nil, err
+	}
+	return &DevicePageResult{Total: total, Page: f.Page, PageSize: f.PageSize, Items: items}, nil
+}
+
+// ProjectDeviceCount 项目文件夹卡片上的设备计数角标。
+type ProjectDeviceCount struct {
+	ProjectID uint  `gorm:"column:project_id" json:"project_id"`
+	Total     int64 `gorm:"column:total" json:"total"`
+	Online    int64 `gorm:"column:online" json:"online"`
+	Disabled  int64 `gorm:"column:disabled" json:"disabled"`
+	Pending   int64 `gorm:"column:pending" json:"pending"`
+}
+
+// AggregateDeviceCountsByProjects 一条 GROUP BY 取各项目设备计数。
+// projectIDs 为空（超管）时聚合全部项目；无设备的项目不出现在结果中，由前端补零。
+func (s *Store) AggregateDeviceCountsByProjects(projectIDs []uint) ([]ProjectDeviceCount, error) {
+	var rows []ProjectDeviceCount
+	q := s.db.Model(&model.Device{}).
+		Select(`project_id,
+			COUNT(*) AS total,
+			SUM(CASE WHEN enabled = 1 AND status = ? AND NOT (product_id > 0 AND (device_secret = '' OR device_secret IS NULL)) THEN 1 ELSE 0 END) AS online,
+			SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END) AS disabled,
+			SUM(CASE WHEN product_id > 0 AND (device_secret = '' OR device_secret IS NULL) THEN 1 ELSE 0 END) AS pending`,
+			model.DeviceStatusOnline).
+		Group("project_id")
+	if len(projectIDs) > 0 {
+		q = q.Where("project_id IN ?", projectIDs)
+	}
+	if err := q.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (s *Store) UpdateDeviceStatus(deviceID string, status int) error {

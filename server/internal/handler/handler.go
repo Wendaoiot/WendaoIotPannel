@@ -508,6 +508,140 @@ func (h *Handler) ListDevices(c *gin.Context) {
 	success(c, devices)
 }
 
+// ListDevicesPage GET /devices/page
+// 分页检索设备（千台规模）：project_id / keyword(SN或名称) / status / page / page_size。
+// 旧 GET /devices 全量语义保留给下拉等场景；本接口供设备管理卡片列表使用。
+func (h *Handler) ListDevicesPage(c *gin.Context) {
+	_, tenantID := getAuthInfo(c)
+
+	var q struct {
+		ProjectID uint   `form:"project_id"`
+		Keyword   string `form:"keyword"`
+		Status    string `form:"status"`
+		Page      int    `form:"page"`
+		PageSize  int    `form:"page_size"`
+	}
+	if err := c.ShouldBindQuery(&q); err != nil {
+		fail(c, -1, err.Error())
+		return
+	}
+
+	switch strings.TrimSpace(q.Status) {
+	case "", "online", "offline", "disabled", "pending":
+	default:
+		fail(c, http.StatusBadRequest, "status 仅支持：online/offline/disabled/pending")
+		return
+	}
+
+	var scopeProjectIDs []uint
+	if tenantID != nil {
+		projects, err := h.store.ListProjectsByTenant(*tenantID)
+		if err != nil {
+			fail(c, -1, err.Error())
+			return
+		}
+		for _, p := range projects {
+			scopeProjectIDs = append(scopeProjectIDs, p.ID)
+		}
+		if len(scopeProjectIDs) == 0 {
+			success(c, gin.H{"total": 0, "page": 1, "page_size": 24, "items": []model.Device{}})
+			return
+		}
+	}
+
+	// 指定项目时仍做租户归属校验，防止越权遍历他人项目。
+	if q.ProjectID > 0 && !h.assertProjectBelongsToTenant(q.ProjectID, tenantID) {
+		fail(c, 403, "无权查看此项目的设备")
+		return
+	}
+
+	page := q.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := q.PageSize
+	if pageSize <= 0 {
+		pageSize = 24
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+
+	result, err := h.store.ListDevicesPage(store.DevicePageFilter{
+		ProjectIDs: scopeProjectIDs,
+		ProjectID:  q.ProjectID,
+		Keyword:    q.Keyword,
+		Status:     strings.TrimSpace(q.Status),
+		Page:       page,
+		PageSize:   pageSize,
+	})
+	if err != nil {
+		fail(c, -1, err.Error())
+		return
+	}
+	success(c, result)
+}
+
+// GetProjectDeviceStats GET /projects/device-stats
+// 返回各项目设备计数（文件夹卡片角标）：{project_id:{total,online,offline,pending,disabled}}。
+// 超管可 ?tenant_id= 限定租户；租户管理员强制本租户。无设备/不可见项目由前端补零。
+func (h *Handler) GetProjectDeviceStats(c *gin.Context) {
+	role, tenantID := getAuthInfo(c)
+	if role == model.RoleTenantAdmin && tenantID == nil {
+		fail(c, -1, "租户信息异常")
+		return
+	}
+
+	var scopeTenant *uint
+	if tenantID != nil {
+		scopeTenant = tenantID
+	} else {
+		// 超级管理员：可按 tenant_id 过滤，缺省=全部
+		var req struct {
+			TenantID uint `form:"tenant_id"`
+		}
+		c.ShouldBindQuery(&req)
+		if req.TenantID > 0 {
+			t := req.TenantID
+			scopeTenant = &t
+		}
+	}
+
+	var projectIDs []uint
+	if scopeTenant != nil {
+		projects, err := h.store.ListProjectsByTenant(*scopeTenant)
+		if err != nil {
+			fail(c, -1, err.Error())
+			return
+		}
+		for _, p := range projects {
+			projectIDs = append(projectIDs, p.ID)
+		}
+	}
+
+	rows, err := h.store.AggregateDeviceCountsByProjects(projectIDs)
+	if err != nil {
+		fail(c, -1, err.Error())
+		return
+	}
+
+	out := gin.H{}
+	for _, r := range rows {
+		offline := r.Total - r.Online - r.Disabled - r.Pending
+		if offline < 0 {
+			offline = 0
+		}
+		out[strconv.FormatUint(uint64(r.ProjectID), 10)] = gin.H{
+			"total":    r.Total,
+			"online":   r.Online,
+			"offline":  offline,
+			"pending":  r.Pending,
+			"disabled": r.Disabled,
+		}
+	}
+	success(c, out)
+}
+
 func (h *Handler) GetDevice(c *gin.Context) {
 	deviceID := c.Param("deviceId")
 	_, tenantID := getAuthInfo(c)

@@ -150,7 +150,7 @@
           <el-table :data="historyData" stripe border @selection-change="onHistorySelectionChange">
             <el-table-column v-if="isSuperAdmin" type="selection" width="42" align="center" />
             <el-table-column prop="id" label="ID" width="80" align="center" />
-            <el-table-column prop="msg_id" label="消息ID" width="120" show-overflow-tooltip />
+            <el-table-column prop="msg_id" label="消息ID" min-width="120" show-overflow-tooltip />
             <el-table-column prop="ts" label="上报时间" width="180" align="center">
               <template #default="{ row }">
                 {{ formatDate(row.ts) }}

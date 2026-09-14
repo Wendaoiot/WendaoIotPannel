@@ -161,6 +161,8 @@ type AdminUser struct {
 	TenantID      *uint      `json:"tenant_id"`
 	TokenVersion  uint       `gorm:"default:0" json:"-"` // 改密/重置/删除后递增，使旧 token 失效
 	PassChangedAt *time.Time `json:"-"`                  // 可空：未改过密码时为 NULL（MySQL8 严格模式不接受零值日期）
+	// UIOptions 每账号界面偏好（JSON），如设备管理是否按项目二级浏览。json:"-" 不随用户对象返回，走独立偏好接口。
+	UIOptions  string     `gorm:"type:text" json:"-"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }

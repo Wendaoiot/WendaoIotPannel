@@ -108,6 +108,35 @@ export function getDevices(projectId?: number): Promise<{ code: number; msg: str
   return http.get('/devices', { params })
 }
 
+// 设备状态筛选（与后端 /devices/page 对齐）：''=全部
+export type DeviceStatusFilter = '' | 'online' | 'offline' | 'pending' | 'disabled'
+
+export interface DevicePageQuery {
+  project_id?: number
+  keyword?: string
+  status?: DeviceStatusFilter
+  page?: number
+  page_size?: number
+}
+
+export interface DevicePage {
+  total: number
+  page: number
+  page_size: number
+  items: Device[]
+}
+
+// 分页检索设备（千台规模）：服务端关键字(SN/名称)、状态过滤、在线优先+最近活跃排序。
+export function getDevicesPage(query: DevicePageQuery): Promise<{ code: number; msg: string; data: DevicePage }> {
+  const params: Record<string, string | number> = {}
+  if (query.project_id !== undefined && query.project_id !== null) params.project_id = query.project_id
+  if (query.keyword && query.keyword.trim()) params.keyword = query.keyword.trim()
+  if (query.status) params.status = query.status
+  params.page = query.page && query.page > 0 ? query.page : 1
+  params.page_size = query.page_size && query.page_size > 0 ? query.page_size : 24
+  return http.get('/devices/page', { params })
+}
+
 export function getDevice(deviceId: string): Promise<{ code: number; msg: string; data: Device }> {
   return http.get(`/devices/${deviceId}`)
 }

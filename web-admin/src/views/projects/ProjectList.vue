@@ -88,6 +88,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { Plus, Setting } from '@element-plus/icons-vue'
 import { getProjects, createProject, updateProject, deleteProject, type Project } from '@/api/project'
 import { getTenants, type Tenant } from '@/api/tenant'
 import { useAuthStore } from '@/stores/auth'

@@ -3,8 +3,8 @@
     <el-card class="table-card">
       <el-table :data="users" v-loading="loading" stripe border>
         <el-table-column prop="id" label="ID" width="80" align="center" />
-        <el-table-column prop="username" label="用户名" width="160" />
-        <el-table-column label="角色" width="140" align="center">
+        <el-table-column prop="username" label="用户名" min-width="160" show-overflow-tooltip />
+        <el-table-column label="角色" min-width="140" align="center">
           <template #default="{ row }">
             <el-tag :type="row.role === 'super_admin' ? 'danger' : 'warning'" size="small">
               {{ row.role === 'super_admin' ? '超级管理员' : '租户管理员' }}

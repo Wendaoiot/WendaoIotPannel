@@ -46,16 +46,25 @@ const router = createRouter({
           meta: { title: '项目设置', back: '/projects', backLabel: '返回项目管理' }
         },
         {
-          path: 'products',
-          name: 'Products',
-          component: () => import('@/views/products/ProductList.vue'),
-          meta: { title: '产品管理' }
+          // 项目文件夹内的设备列表：复用 DeviceList（组件读路由参数锁定项目）
+          path: 'projects/:projectId/devices',
+          name: 'ProjectDevices',
+          component: () => import('@/views/devices/DeviceList.vue'),
+          meta: { title: '设备管理', back: '/devices', backLabel: '返回设备管理', projectScoped: true }
         },
         {
+          // 设备管理主页：按项目卡片分类（含“全部设备”入口）
           path: 'devices',
           name: 'Devices',
-          component: () => import('@/views/devices/DeviceList.vue'),
+          component: () => import('@/views/devices/DeviceHome.vue'),
           meta: { title: '设备管理' }
+        },
+        {
+          // 跨项目全部设备总览
+          path: 'devices/all',
+          name: 'AllDevices',
+          component: () => import('@/views/devices/DeviceList.vue'),
+          meta: { title: '全部设备', back: '/devices', backLabel: '返回设备管理' }
         },
         {
           // 设备中心壳：页头 + Tab 页签；旧子页面路由原地保留为子路由，深链不变

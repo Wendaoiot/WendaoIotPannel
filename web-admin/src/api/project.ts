@@ -38,6 +38,20 @@ export function deleteProject(id: number): Promise<{ code: number; msg: string }
   return http.delete(`/projects/${id}`)
 }
 
+// 项目文件夹设备计数角标：{ [project_id]: {total, online, offline, pending, disabled} }
+export interface ProjectDeviceStats {
+  total: number
+  online: number
+  offline: number
+  pending: number
+  disabled: number
+}
+
+export function getProjectDeviceStats(tenantId?: number): Promise<{ code: number; msg: string; data: Record<string, ProjectDeviceStats> }> {
+  const params = tenantId ? { tenant_id: tenantId } : {}
+  return http.get('/projects/device-stats', { params })
+}
+
 // 项目级在线判定默认；online_mode 传 '' 表示沿用系统默认，offline_timeout_sec=0 沿用系统时限
 export function updateProjectSettings(
   id: number,

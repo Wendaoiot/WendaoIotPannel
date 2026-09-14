@@ -28,6 +28,18 @@ func (s *Store) UpdateAdminUserPasswordAndBump(id uint, hashedPassword string) e
 		}).Error
 }
 
+// GetAdminUserUIOptions 返回某账号原始 UI 偏好 JSON 串（空串=全部默认）。
+func (s *Store) GetAdminUserUIOptions(id uint) (string, error) {
+	var opts string
+	err := s.db.Model(&model.AdminUser{}).Where("id = ?", id).Pluck("ui_options", &opts).Error
+	return opts, err
+}
+
+// UpdateAdminUserUIOptions 保存某账号原始 UI 偏好 JSON 串。
+func (s *Store) UpdateAdminUserUIOptions(id uint, optsJSON string) error {
+	return s.db.Model(&model.AdminUser{}).Where("id = ?", id).Update("ui_options", optsJSON).Error
+}
+
 // BumpTokenVersion 递增用户 token 版本（如下线/强制重新登录）。
 func (s *Store) BumpTokenVersion(id uint) error {
 	return s.db.Model(&model.AdminUser{}).Where("id = ?", id).

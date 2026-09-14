@@ -12,6 +12,7 @@
         <el-tab-pane label="在线判定默认" name="online" />
         <el-tab-pane label="数据字典" name="dictionary" />
         <el-tab-pane label="控制指令" name="commands" />
+        <el-tab-pane label="产品（一型一密）" name="products" />
       </el-tabs>
     </div>
 
@@ -137,6 +138,13 @@
           <ProjectCommandManager :project-id="projectId" />
         </section>
       </div>
+
+      <!-- 产品（一型一密）：租户级型号凭证，在项目上下文中管理 -->
+      <div v-if="activeTab === 'products' && project" class="tab-panel">
+        <section class="panel manager-panel">
+          <ProjectProducts :tenant-id="project.tenant_id" />
+        </section>
+      </div>
     </div>
   </div>
 </template>
@@ -155,6 +163,7 @@ import { useAuthStore } from '@/stores/auth'
 import { ONLINE_MODES, normalizeOnlineMode, onlineModeText } from '@/utils/onlineMode'
 import ProjectTagManager from '@/components/ProjectTagManager.vue'
 import ProjectCommandManager from '@/components/ProjectCommandManager.vue'
+import ProjectProducts from '@/components/ProjectProducts.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -167,7 +176,7 @@ const tenants = ref<Tenant[]>([])
 const loading = ref(false)
 
 // tab 与 URL query 同步（旧 tags 链接 redirect 时带 ?tab=dictionary）
-const validTabs = ['basic', 'online', 'dictionary', 'commands']
+const validTabs = ['basic', 'online', 'dictionary', 'commands', 'products']
 const activeTab = ref((route.query.tab as string) && validTabs.includes(route.query.tab as string) ? route.query.tab as string : 'basic')
 function syncTabQuery(name: string | number) {
   router.replace({ query: { ...route.query, tab: String(name) } })
