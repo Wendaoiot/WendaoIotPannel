@@ -301,3 +301,50 @@ func (s *Store) CountDeviceData(deviceID string) (int64, error) {
 	err := s.db.Model(&model.DeviceData{}).Where("device_id = ?", deviceID).Count(&n).Error
 	return n, err
 }
+
+// ========================= 日志删除（仅超管，物理删除） =========================
+
+// DeleteControlLogsByIDs 按主键批量删除控制日志（行 ID 全局唯一，仅限超管调用）。
+func (s *Store) DeleteControlLogsByIDs(ids []uint) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := s.db.Where("id IN ?", ids).Delete(&model.ControlLog{})
+	return res.RowsAffected, res.Error
+}
+
+// DeleteControlLogsByFilter 按设备/时间范围删除控制日志；deviceID 为空、start/end 为 nil 表示不限制
+// （三者全空即清空全部）。
+func (s *Store) DeleteControlLogsByFilter(deviceID string, start, end *time.Time) (int64, error) {
+	q := s.db.Model(&model.ControlLog{})
+	if deviceID != "" {
+		q = q.Where("device_id = ?", deviceID)
+	}
+	if start != nil {
+		q = q.Where("created_at >= ?", *start)
+	}
+	if end != nil {
+		q = q.Where("created_at <= ?", *end)
+	}
+	res := q.Delete(&model.ControlLog{})
+	return res.RowsAffected, res.Error
+}
+
+// DeleteOTALogsByIDs 按主键批量删除 OTA 升级日志（仅限超管调用）。
+func (s *Store) DeleteOTALogsByIDs(ids []uint) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := s.db.Where("id IN ?", ids).Delete(&model.OTALog{})
+	return res.RowsAffected, res.Error
+}
+
+// DeleteOTALogsByTaskID 清空某升级任务下的全部设备日志；taskID 为 0 表示清空全部 OTA 日志。
+func (s *Store) DeleteOTALogsByTaskID(taskID uint) (int64, error) {
+	q := s.db.Model(&model.OTALog{})
+	if taskID > 0 {
+		q = q.Where("task_id = ?", taskID)
+	}
+	res := q.Delete(&model.OTALog{})
+	return res.RowsAffected, res.Error
+}

@@ -413,8 +413,10 @@ func (s *Store) buildDevicePageQuery(f DevicePageFilter) *gorm.DB {
 	return q
 }
 
-// ListDevicesPage 分页检索设备。默认排序：在线优先 -> 最近活跃(last_active DESC，NULL 最后) -> SN。
-// 该默认排序服务"先看在线、再按最新上传"的运维直觉，且不开放任意排序字段（防注入）。
+// ListDevicesPage 分页检索设备。默认排序：状态分组(在线 -> 离线 -> 待激活 -> 已禁用)
+// -> 创建时间(created_at DESC) -> 最近活跃(last_active DESC，NULL 最后) -> SN。
+// 先按状态四态聚组服务运维巡检直觉；同态内新建设备靠前，再按最新消息时间微调。
+// 不开放任意排序字段（防注入）。
 func (s *Store) ListDevicesPage(f DevicePageFilter) (*DevicePageResult, error) {
 	if f.Page <= 0 {
 		f.Page = 1
@@ -429,10 +431,21 @@ func (s *Store) ListDevicesPage(f DevicePageFilter) (*DevicePageResult, error) {
 		return nil, err
 	}
 
+	// 状态聚组：在线(0) < 离线(1, 兜底分支) < 待激活(2) < 已禁用(3)。
+	// 待激活设备 enabled 恒为 1，不能再用 enabled DESC 置顶。
+	// 待激活口径须与 buildDevicePageQuery 的 pending 过滤保持一致。
+	pendingCond := "product_id > 0 AND (device_secret = '' OR device_secret IS NULL)"
+	statusGroup := fmt.Sprintf(`CASE
+			WHEN enabled = 1 AND status = %d AND NOT (%s) THEN 0
+			WHEN enabled = 1 AND (%s) THEN 2
+			WHEN enabled = 0 THEN 3
+			ELSE 1
+		END`,
+		model.DeviceStatusOnline, pendingCond, pendingCond)
 	var items []model.Device
 	err := s.buildDevicePageQuery(f).
-		Order("enabled DESC").
-		Order(fmt.Sprintf("CASE WHEN status = %d THEN 0 ELSE 1 END", model.DeviceStatusOnline)).
+		Order(statusGroup).
+		Order("created_at DESC").
 		Order("last_active IS NULL").
 		Order("last_active DESC").
 		Order("id ASC").

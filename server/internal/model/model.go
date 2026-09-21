@@ -52,7 +52,10 @@ const (
 
 type Device struct {
 	// COLLATE utf8mb4_bin：设备 ID 严格区分大小写（与 MQTT username/topic/ACL 语义一致）。
-	// 已存在的库需执行 tools/local/mqtt-test/migrate_bin_collation.sql 一次性迁移。
+	// 存量库（devices.id 原为库默认 utf8mb4_unicode_ci）需一次性迁移：
+	// 对 devices.id 及 device_data/device_tags/control_logs/control_commands/ota_logs.device_id
+	// 执行 ALTER TABLE ... MODIFY ... VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL。
+	// 迁移前先 SELECT LOWER(id), COUNT(*) ... GROUP BY LOWER(id) HAVING COUNT(*)>1 排查仅大小写差异的重名设备。
 	ID           string `gorm:"primaryKey;type:varchar(100) COLLATE utf8mb4_bin" json:"id"`
 	ProjectID    uint   `gorm:"index" json:"project_id"`
 	TenantID     uint   `gorm:"index" json:"tenant_id"` // 冗余租户，便于作用域过滤
@@ -162,9 +165,9 @@ type AdminUser struct {
 	TokenVersion  uint       `gorm:"default:0" json:"-"` // 改密/重置/删除后递增，使旧 token 失效
 	PassChangedAt *time.Time `json:"-"`                  // 可空：未改过密码时为 NULL（MySQL8 严格模式不接受零值日期）
 	// UIOptions 每账号界面偏好（JSON），如设备管理是否按项目二级浏览。json:"-" 不随用户对象返回，走独立偏好接口。
-	UIOptions  string     `gorm:"type:text" json:"-"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	UIOptions string    `gorm:"type:text" json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Firmware struct {

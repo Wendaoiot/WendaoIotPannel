@@ -87,6 +87,22 @@ export function getOTALogs(taskId: number): Promise<{ code: number; msg: string;
   return http.get('/ota/logs', { params: { task_id: taskId } })
 }
 
+// 控制日志删除（仅超管）：ids=按行删除；device_id/start/end=按筛选清空；all=true 可与筛选组合，无筛选=清空全部
+export function deleteControlLogs(body: {
+  ids?: number[]
+  device_id?: string
+  start?: number
+  end?: number
+  all?: boolean
+}): Promise<{ code: number; msg: string; data: { deleted: number } }> {
+  return http.delete('/control-logs', { data: body })
+}
+
+// OTA 升级日志删除（仅超管）：ids=按行删除；task_id=清空该任务日志；all=true=清空全部
+export function deleteOTALogs(body: { ids?: number[]; task_id?: number; all?: boolean }): Promise<{ code: number; msg: string; data: { deleted: number } }> {
+  return http.delete('/ota/logs', { data: body })
+}
+
 export function getControlLogs(query: ControlLogQuery = {}): Promise<{ code: number; msg: string; data: { list: ControlLog[]; total: number } }> {
   const params: Record<string, unknown> = {
     limit: query.limit ?? 50,

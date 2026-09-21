@@ -1,0 +1,19 @@
+[Unit]
+Description=WendaoIotPannel backend
+After=network.target mysqld.service mysql.service mariadb.service emqx.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__SRV_DIR__
+ExecStart=__SRV_DIR__/wendao-server
+Restart=always
+RestartSec=3
+# 允许绑定非特权端口；安全加固
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

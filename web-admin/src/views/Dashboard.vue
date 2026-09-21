@@ -68,8 +68,8 @@
             <el-radio-button value="7d">近7天</el-radio-button>
           </el-radio-group>
           <el-radio-group v-model="metricView" size="small">
-            <el-radio-button value="rate">速率</el-radio-button>
             <el-radio-button value="total">累计</el-radio-button>
+            <el-radio-button value="rate">速率</el-radio-button>
           </el-radio-group>
         </div>
 
@@ -84,17 +84,34 @@
           </div>
         </div>
 
-        <div class="chart-wrap" v-loading="histLoading">
+        <div class="chart-wrap">
           <svg class="rate-svg" viewBox="0 0 800 230" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <linearGradient id="grad-in" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="var(--wd-success)" stop-opacity="0.22" />
+                <stop offset="100%" stop-color="var(--wd-success)" stop-opacity="0" />
+              </linearGradient>
+              <linearGradient id="grad-out" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="var(--wd-warning)" stop-opacity="0.18" />
+                <stop offset="100%" stop-color="var(--wd-warning)" stop-opacity="0" />
+              </linearGradient>
+            </defs>
             <line v-for="g in 4" :key="'g'+g" :x1="padL" :x2="chartRight" :y1="gridY(g)" :y2="gridY(g)" class="grid" />
             <line :x1="padL" :x2="chartRight" :y1="chartBottom" :y2="chartBottom" class="axis" />
             <text v-for="g in 5" :key="'y'+g" :x="padL-8" :y="gridY(g-1)+4" text-anchor="end" class="svg-label">{{ yLabels[g-1] }}</text>
-            <path v-if="inArea" :d="inArea" class="area-in" />
-            <path v-if="outArea" :d="outArea" class="area-out" />
-            <path v-if="inPath" :d="inPath" class="line-in" fill="none" />
-            <path v-if="outPath" :d="outPath" class="line-out" fill="none" />
+
+            <!-- 首载/切档：最终图表（真实数据）自左向右揭示 0.9s，揭示出的每一刻都是终态形状；
+                 30s 静默刷新/实时轮询数据直接替换，不重播 -->
+            <g :key="drawKey" class="series" :class="{ 'is-drawing': drawing }">
+              <path v-if="inArea" :d="inArea" fill="url(#grad-in)" class="area-in" />
+              <path v-if="outArea" :d="outArea" fill="url(#grad-out)" class="area-out" />
+              <path v-if="inPath" :d="inPath" class="line-in" />
+              <path v-if="outPath" :d="outPath" class="line-out" />
+              <circle v-if="inLast" :cx="inLast[0]" :cy="inLast[1]" r="3.5" class="line-end line-end-in" />
+              <circle v-if="outLast" :cx="outLast[0]" :cy="outLast[1]" r="3.5" class="line-end line-end-out" />
+            </g>
             <text v-for="(t, i) in xTicks" :key="'x'+i" :x="t.x" :y="chartBottom+20" :text-anchor="t.anchor" class="svg-label svg-x">{{ t.label }}</text>
-            <text v-if="seriesEmpty()" :x="400" :y="(topPad+chartBottom)/2" text-anchor="middle" class="svg-empty">{{ emptyText }}</text>
+            <text v-if="seriesEmpty() && !chartLoading" :x="400" :y="(topPad+chartBottom)/2" text-anchor="middle" class="svg-empty">{{ emptyText }}</text>
           </svg>
         </div>
         <p class="chart-hint">{{ chartHint }}</p>
@@ -167,17 +184,34 @@ function formatNum(n: number): string {
   return (n || 0).toLocaleString('zh-CN')
 }
 
-// 大数字速率取最近 5 秒计数（近似滑动窗口，条/秒），比"当前秒"稳定、不频繁跳 0；
-// 瞬时波动由下方 30 秒折线展示
+// 大数字与折线均由同一序列派生：累计=前缀和，速率=桶计数折算到分钟/小时。
 // ===== 消息监控：时间档 × 指标视图 =====
 type TimeRangeKey = 'live' | TrafficRangeKey
 type MetricView = 'rate' | 'total'
-const timeRange = ref<TimeRangeKey>('live')
-const metricView = ref<MetricView>('rate')
-const histLoading = ref(false)
+// 默认近 24 小时（该档通常有数据，且累计视图有持续爬升的图线效果）
+const timeRange = ref<TimeRangeKey>('24h')
+// 默认展示累计（有持续爬升的图线效果）；速率为次视图
+const metricView = ref<MetricView>('total')
+// 仅首载/切换时间档时为 true（显示绘制动画）；30s 后台刷新与实时 2s 轮询静默，不闪动画
+const chartLoading = ref(true)
 const hist = ref<{ bucketSec: number; startSec: number; in: number[]; out: number[] } | null>(null)
 
 const RANGE_BUCKET: Record<TimeRangeKey, number> = { live: 1, '1h': 60, '24h': 600, '7d': 3600 }
+// 速率单位时长：实时/近1小时按“条/分钟”，近24小时/近7天按“条/小时”
+const RATE_UNIT_SEC: Record<TimeRangeKey, number> = { live: 60, '1h': 60, '24h': 3600, '7d': 3600 }
+// 真实曲线描画动画：非静默加载完成后递增 drawKey 使序列 <g> 重挂载，
+// CSS 动画把最终折线从左到右描出（0.9s），描完即终态。
+const drawing = ref(false)
+const drawKey = ref(0)
+let drawTimer: ReturnType<typeof setTimeout> | null = null
+const DRAW_ANIM_MS = 1000
+
+function startDraw() {
+  if (drawTimer) clearTimeout(drawTimer)
+  drawKey.value++
+  drawing.value = true
+  drawTimer = setTimeout(() => { drawing.value = false }, DRAW_ANIM_MS)
+}
 const HIST_REFRESH_SEC = 30
 
 // 原始每桶“条数”序列：实时=内存环 30 点(1s)；历史=接口分桶
@@ -186,9 +220,9 @@ const rawIn = computed<number[]>(() =>
 const rawOut = computed<number[]>(() =>
   timeRange.value === 'live' ? stats.series_out : hist.value?.out ?? [])
 
-// 展示序列：速率=每桶条数/桶秒；累计=前缀和
-function perRate(a: number[], bucketSec: number): number[] {
-  return a.map(v => v / bucketSec)
+// 展示序列：速率=每桶条数折算到速率单位（分钟/小时）；累计=前缀和
+function perRate(a: number[], bucketSec: number, unitSec: number): number[] {
+  return a.map(v => v * unitSec / bucketSec)
 }
 function cumulative(a: number[]): number[] {
   let acc = 0
@@ -197,16 +231,35 @@ function cumulative(a: number[]): number[] {
 
 const viewIn = computed<number[]>(() => {
   const b = RANGE_BUCKET[timeRange.value]
-  return metricView.value === 'rate' ? perRate(rawIn.value, b) : cumulative(rawIn.value)
+  return metricView.value === 'rate' ? perRate(rawIn.value, b, RATE_UNIT_SEC[timeRange.value]) : cumulative(rawIn.value)
 })
 const viewOut = computed<number[]>(() => {
   const b = RANGE_BUCKET[timeRange.value]
-  return metricView.value === 'rate' ? perRate(rawOut.value, b) : cumulative(rawOut.value)
+  return metricView.value === 'rate' ? perRate(rawOut.value, b, RATE_UNIT_SEC[timeRange.value]) : cumulative(rawOut.value)
 })
 
-const valUnit = computed(() => (metricView.value === 'rate' ? '条/秒' : '条'))
-const currentIn = computed(() => formatChartValue(viewIn.value[viewIn.value.length - 1] ?? 0))
-const currentOut = computed(() => formatChartValue(viewOut.value[viewOut.value.length - 1] ?? 0))
+const valUnit = computed(() => {
+  if (metricView.value === 'total') return '条'
+  return RATE_UNIT_SEC[timeRange.value] >= 3600 ? '条/小时' : '条/分钟'
+})
+// 速率视图显示“本区间平均速率”（总量÷区间时长），避免低流量下最后一个桶恒为 0；
+// 累计视图仍显示前缀和末端（=区间累计）
+const avgRateIn = computed(() => {
+  const a = rawIn.value
+  if (!a.length) return 0
+  const totalSec = a.length * RANGE_BUCKET[timeRange.value]
+  return a.reduce((x, y) => x + y, 0) / totalSec * RATE_UNIT_SEC[timeRange.value]
+})
+const avgRateOut = computed(() => {
+  const a = rawOut.value
+  if (!a.length) return 0
+  const totalSec = a.length * RANGE_BUCKET[timeRange.value]
+  return a.reduce((x, y) => x + y, 0) / totalSec * RATE_UNIT_SEC[timeRange.value]
+})
+const currentIn = computed(() =>
+  chartLoading.value ? '—' : formatChartValue(metricView.value === 'rate' ? avgRateIn.value : viewIn.value[viewIn.value.length - 1] ?? 0))
+const currentOut = computed(() =>
+  chartLoading.value ? '—' : formatChartValue(metricView.value === 'rate' ? avgRateOut.value : viewOut.value[viewOut.value.length - 1] ?? 0))
 
 const rangeSumIn = computed(() => formatNum(rawIn.value.reduce((a, b) => a + b, 0)))
 const rangeSumOut = computed(() => formatNum(rawOut.value.reduce((a, b) => a + b, 0)))
@@ -214,17 +267,21 @@ const rangeSumOut = computed(() => formatNum(rawOut.value.reduce((a, b) => a + b
 const emptyText = computed(() =>
   timeRange.value === 'live' ? '暂无实时消息' : '该时间段暂无消息')
 const chartHint = computed(() => {
+  const unitSuffix = metricView.value === 'rate' ? ` · 速率单位：${valUnit.value}` : ''
   if (timeRange.value === 'live') {
-    return `最近 30 秒速率（${refreshSec}s 刷新）· 当前服务节点近似值`
+    return `最近 30 秒（${refreshSec}s 刷新）· 当前服务节点近似值${unitSuffix}`
   }
   const b = RANGE_BUCKET[timeRange.value]
   const bucketLabel = b >= 3600 ? `${b / 3600} 小时` : b >= 60 ? `${b / 60} 分钟` : `${b} 秒`
-  return `每 ${bucketLabel}一个采样点 · ${HIST_REFRESH_SEC}s 自动刷新 · 数据来自数据库消息记录`
+  return `每 ${bucketLabel}一个采样点 · ${HIST_REFRESH_SEC}s 自动刷新 · 数据来自数据库消息记录${unitSuffix}`
 })
 
 // ===== 折线（viewBox 800x230，绘图区 x:[padL,chartRight] y:[20,180]） =====
 const padL = 46
 const chartRight = 790
+// 数据点相对网格左右各内缩数个单位，首末点不贴轴端
+const plotLeft = padL + 8
+const plotRight = chartRight - 8
 const topPad = 20
 const chartBottom = 180
 
@@ -232,9 +289,13 @@ function gridY(g: number): number {
   return chartBottom - g * ((chartBottom - topPad) / 4)
 }
 
+// Y 轴动态范围：按当前序列最大值取整，再预留 1/5 顶部空白
+// （轴顶 ≥ 最大值 ×1.25，曲线最高点不超过绘图区 4/5）
+const PLOT_HEADROOM = 1.25
 const yAxisMax = computed(() => {
-  const max = Math.max(1, ...viewIn.value, ...viewOut.value)
-  return niceStep(max) * 4
+  // 速率可能远小于 1（如 0.1 条/分钟），下限不能钳到 1，否则小数速率被压成贴轴平线
+  const max = Math.max(1e-9, ...viewIn.value, ...viewOut.value)
+  return niceStep(max * PLOT_HEADROOM) * 4
 })
 const yLabels = computed(() => {
   const max = yAxisMax.value / 4
@@ -242,45 +303,62 @@ const yLabels = computed(() => {
 })
 
 function niceStep(max: number): number {
-  if (max <= 4) return 1
+  // 入参已乘 1.25（顶部 1/5 留白）；这里取“每格步长”，必须向上取整，
+  // 否则留白会被取整吞掉、曲线顶到绘图区上缘（紧贴上方流入/流出数值卡）。
+  // 梯级集合 {1,2,3,5,10}（乘以 10 的幂）：整数时得 0/3/6/9/12，小数速率时得 0/0.05/0.1/0.15。
   const raw = max / 4
   const pow = Math.pow(10, Math.floor(Math.log10(raw)))
   const n = raw / pow
-  const m = n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10
+  const m = n <= 1 ? 1 : n <= 2 ? 2 : n <= 3 ? 3 : n <= 5 ? 5 : 10
   return m * pow
 }
 
+// 统一两位小数精度：<100 保留最多两位（去尾零）；≥100 取整，轴面更整洁
+function fmt2(v: number): string {
+  if (v >= 100 || Number.isInteger(v)) return formatNum(Math.round(v))
+  return (Math.round(v * 100) / 100).toLocaleString('zh-CN')
+}
 function formatAxis(v: number): string {
   if (v >= 10000) return `${Math.round(v / 1000) / 10}w`
-  if (Number.isInteger(v)) return String(v)
-  return (Math.round(v * 10) / 10).toString()
+  return fmt2(v)
 }
 function formatChartValue(v: number): string {
-  if (Number.isInteger(v)) return formatNum(v)
-  return (Math.round(v * 10) / 10).toLocaleString('zh-CN')
+  return fmt2(v)
 }
 
-function buildPath(series: number[]): { line: string; area: string } {
-  if (!series.length || series.every(v => v === 0)) return { line: '', area: '' }
-  const maxV = Math.max(1, yAxisMax.value)
+function buildPath(series: number[]): { line: string; area: string; points: Array<readonly [number, number]> } {
+  if (!series.length || series.every(v => v === 0)) return { line: '', area: '', points: [] }
+  // 不能钳到 1：小数速率（0.1 条/分）会被压成贴轴平线
+  const maxV = Math.max(1e-9, yAxisMax.value)
   const n = series.length
-  const left = padL
+  const left = plotLeft
   const h = chartBottom - topPad
-  const w = chartRight - left
-  const xy = series.map((v, i) => {
+  const w = plotRight - left
+  const points = series.map((v, i) => {
     const x = left + (n === 1 ? w / 2 : (i / (n - 1)) * w)
     const y = chartBottom - Math.min(v, maxV) / maxV * h
     return [x, y] as const
   })
-  const line = xy.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
-  const area = `${line} L${xy[n - 1][0].toFixed(1)},${chartBottom} L${xy[0][0].toFixed(1)},${chartBottom} Z`
-  return { line, area }
+  const line = points.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
+  const area = `${line} L${points[n - 1][0].toFixed(1)},${chartBottom} L${points[0][0].toFixed(1)},${chartBottom} Z`
+  return { line, area, points }
 }
 
-const inPath = computed(() => buildPath(viewIn.value).line)
-const outPath = computed(() => buildPath(viewOut.value).line)
-const inArea = computed(() => buildPath(viewIn.value).area)
-const outArea = computed(() => buildPath(viewOut.value).area)
+const inGeom = computed(() => buildPath(viewIn.value))
+const outGeom = computed(() => buildPath(viewOut.value))
+const inPath = computed(() => inGeom.value.line)
+const outPath = computed(() => outGeom.value.line)
+const inArea = computed(() => inGeom.value.area)
+const outArea = computed(() => outGeom.value.area)
+// 序列末端当前值圆点（白色描边）
+const inLast = computed(() => {
+  const p = inGeom.value.points
+  return p.length ? p[p.length - 1] : null
+})
+const outLast = computed(() => {
+  const p = outGeom.value.points
+  return p.length ? p[p.length - 1] : null
+})
 
 function seriesEmpty(): boolean {
   return viewIn.value.every(v => v === 0) && viewOut.value.every(v => v === 0)
@@ -298,16 +376,21 @@ const xTicks = computed(() => {
   const startSec = timeRange.value === 'live'
     ? nowSec - (n - 1)
     : hist.value?.startSec ?? nowSec - (n - 1) * bucketSec
-  const left = padL, w = chartRight - left
+  const left = plotLeft, w = plotRight - plotLeft
+  const nowD = new Date()
   const tickCount = Math.min(6, n)
   const ticks: { x: number; label: string; anchor: string }[] = []
   for (let t = 0; t < tickCount; t++) {
     const i = tickCount === 1 ? 0 : Math.round(t * (n - 1) / (tickCount - 1))
     const d = new Date((startSec + i * bucketSec) * 1000)
     let label: string
+    const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    // 跨天的分钟档刻度前缀日期；小时间档(7d)显示月-日；秒档显示到秒
     if (bucketSec >= 3600) label = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-    else if (bucketSec === 1) label = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
-    else label = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+    else if (bucketSec === 1) label = `${hm}:${pad2(d.getSeconds())}`
+    else if (d.getFullYear() !== nowD.getFullYear() || d.getMonth() !== nowD.getMonth() || d.getDate() !== nowD.getDate()) {
+      label = `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ${hm}`
+    } else label = hm
     const anchor = t === 0 ? 'start' : t === tickCount - 1 ? 'end' : 'middle'
     ticks.push({ x: left + (n === 1 ? w / 2 : (i / (n - 1)) * w), label, anchor })
   }
@@ -344,8 +427,9 @@ async function fetchStats(showLoading = false) {
   }
 }
 
-async function fetchTraffic(range: TrafficRangeKey) {
-  histLoading.value = true
+// silent=后台定时刷新：数据静默替换，不触发绘制动画
+async function fetchTraffic(range: TrafficRangeKey, silent = false) {
+  if (!silent) chartLoading.value = true
   try {
     const res = await getDashboardTraffic(range)
     if (res.data) {
@@ -355,17 +439,29 @@ async function fetchTraffic(range: TrafficRangeKey) {
         in: res.data.series_in,
         out: res.data.series_out
       }
+      // 真实数据到齐后再描画；静默刷新不重播
+      if (!silent) {
+        chartLoading.value = false
+        // 等 DOM 先套用新 d，再用 key 重挂载触发描画，保证画的是当前数据
+        requestAnimationFrame(() => startDraw())
+      }
     }
   } catch {
   } finally {
-    histLoading.value = false
+    if (!silent && !hist.value) chartLoading.value = false
   }
 }
 
 function onRangeChange(v: string | number | boolean | undefined) {
   const r = String(v) as TimeRangeKey
   hist.value = null
-  if (r !== 'live') fetchTraffic(r as TrafficRangeKey)
+  if (r !== 'live') {
+    fetchTraffic(r as TrafficRangeKey)
+  } else {
+    // 实时档数据随 stats 轮询到达，无需拉取；用当前已轮询到的序列描画一次
+    chartLoading.value = false
+    requestAnimationFrame(() => startDraw())
+  }
 }
 
 // 2s 定轮询实时速率与总量；历史档 30s 刷新；设备上下线/激活事件防抖重取
@@ -377,9 +473,11 @@ let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
 onMounted(() => {
   fetchStats(true)
+  // 默认 24h：首载拉取一次，期间显示折线绘制动画
+  fetchTraffic('24h')
   pollTimer = setInterval(() => fetchStats(), refreshSec * 1000)
   histTimer = setInterval(() => {
-    if (timeRange.value !== 'live') fetchTraffic(timeRange.value as TrafficRangeKey)
+    if (timeRange.value !== 'live') fetchTraffic(timeRange.value as TrafficRangeKey, true)
   }, HIST_REFRESH_SEC * 1000)
   offRealtime = onMessage((msg) => {
     if (msg.type !== 'device_status' && msg.type !== 'device_activated') return
@@ -393,6 +491,7 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (histTimer) clearInterval(histTimer)
   if (refreshTimer) clearTimeout(refreshTimer)
+  if (drawTimer) clearTimeout(drawTimer)
 })
 </script>
 
@@ -574,10 +673,26 @@ onUnmounted(() => {
 .svg-label { fill: var(--wd-text-placeholder); font-size: 12px; }
 .svg-x { font-size: 11px; }
 .svg-empty { fill: var(--wd-text-secondary); font-size: 16px; }
+.line-in, .line-out { fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .line-in { stroke: var(--wd-success); stroke-width: 2; }
 .line-out { stroke: var(--wd-warning); stroke-width: 2; }
-.area-in { fill: var(--wd-success); opacity: 0.1; }
-.area-out { fill: var(--wd-warning); opacity: 0.08; }
+.line-end { stroke: #fff; stroke-width: 1.5; }
+.line-end-in { fill: var(--wd-success); }
+.line-end-out { fill: var(--wd-warning); }
+
+/* 真实曲线描画：数据到齐后序列 <g> 以 is-drawing 重挂载，
+   右裁剪边自 100% 收到 0，最终图表从左向右揭示；揭示出的每一帧都是终态形状，
+   故前段长时间零消息时前半段本就贴基线（正常，不是空动画） */
+.series.is-drawing {
+  clip-path: inset(0 100% 0 0);
+  animation: chart-reveal 0.9s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+}
+@keyframes chart-reveal {
+  to { clip-path: inset(0 0 0 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .series.is-drawing { animation: none; clip-path: none; }
+}
 .chart-hint { margin: 8px 0 0; font-size: 11.5px; color: var(--wd-text-placeholder); }
 
 .msg-sum {

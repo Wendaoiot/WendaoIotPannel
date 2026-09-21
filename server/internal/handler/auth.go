@@ -44,8 +44,18 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 	if !cryptopkg.CheckPassword(user.Password, req.Password) {
-		authFail(c)
-		return
+		// 兼容历史裸 SHA-256：验证通过后自动升级为 bcrypt（无感迁移）。
+		if !(cryptopkg.IsLegacySHA256(user.Password) &&
+			cryptopkg.CheckLegacySHA256(user.Password, req.Password)) {
+			authFail(c)
+			return
+		}
+		if newHash, err := cryptopkg.HashPassword(req.Password); err == nil {
+			if err := h.store.UpdateAdminUserPassword(user.ID, newHash); err != nil {
+				log.Printf("upgrade legacy password hash for %s failed: %v", user.Username, err)
+			}
+			user.Password = newHash
+		}
 	}
 
 	tokenStr, err := tokenMgr.Issue(token.Claims{

@@ -12,8 +12,9 @@
 #   WQ_MQTT_AUTH_SECRET   EMQX 认证/ACL 回调共享密钥
 #   WQ_EMQX_API_BASE / WQ_EMQX_API_KEY / WQ_EMQX_API_SECRET   EMQX REST API（设备会话互踢）
 #   WQ_CORS_ORIGINS       允许的前端来源（逗号分隔）
-#   WQ_DEVICE_ONLINE_MODE  设备在线判定模式（connection / report）
+#   WQ_DEVICE_ONLINE_MODE  设备在线判定模式（connection / report / ping）
 #   WQ_DEVICE_OFFLINE_TIMEOUT_SEC / WQ_DEVICE_SCAN_INTERVAL_SEC
+#   WQ_DEVICE_PING_INTERVAL_SEC  ping 模式探活发送周期
 #   WQ_INSECURE=1         仅本地开发：跳过密钥强度校验（生产严禁使用）
 #
 # 生成强随机密钥：  openssl rand -base64 48

@@ -20,7 +20,7 @@
         <el-table-column label="操作" width="200" align="center" fixed="right">
           <template #default="{ row }">
             <el-button size="small" type="warning" @click="showResetDialog(row)">重置密码</el-button>
-            <el-button size="small" type="danger" @click="handleDelete(row)">删除</el-button>
+            <el-button v-if="row.id !== currentUserId" size="small" type="danger" @click="handleDelete(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -44,9 +44,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { listUsers, adminResetPassword, deleteUser, type UserListItem } from '@/api/auth'
+import { useAuthStore } from '@/stores/auth'
+
+const authStore = useAuthStore()
+const currentUserId = computed(() => authStore.user?.id || 0)
 
 const users = ref<UserListItem[]>([])
 const loading = ref(false)
@@ -106,6 +110,10 @@ async function handleReset() {
 }
 
 async function handleDelete(row: UserListItem) {
+  if (row.id === currentUserId.value) {
+    ElMessage.warning('不能删除当前登录的账号')
+    return
+  }
   try {
     await ElMessageBox.confirm(`确定要删除用户 "${row.username}" 吗？此操作不可恢复。`, '确认删除', {
       type: 'warning'

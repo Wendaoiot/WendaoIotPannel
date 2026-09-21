@@ -1,0 +1,67 @@
+# WendaoIotPannel 本地/单机容器栈
+# - MySQL 8.0 : 宿主 127.0.0.1:${MYSQL_PORT}，库名由 MYSQL_DATABASE 指定（默认 wendaoiot），utf8mb4
+# - EMQX 5.8 : MQTT 1883 / mqtts 8883 / WS 8083 / WSS 8084 / Dashboard 18083
+#               HTTP 认证/ACL 回调指向宿主机 Go server：
+#               http://host.docker.internal:${SERVER_PORT}/api/v1/mqtt/{auth,acl}
+#
+# 用法：
+#   1) cp .env.example .env   # 按需修改密码
+#   2) ./gen-certs.sh         # Windows PowerShell: ./gen-certs.ps1（生成 8883 证书）
+#   3) docker compose up -d
+#   4) ./configure-emqx.sh    # Windows PowerShell: ./configure-emqx.ps1（配置认证/ACL 链）
+# 清库重来： docker compose down -v
+#
+# 所有密码均可在 .env 中覆盖；括号内为仅用于本机开发的默认值。
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: wq-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-wendaoiot_dev_root}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-wendaoiot}"
+      TZ: "Asia/Shanghai"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - wq-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  emqx:
+    image: emqx/emqx:5.8.4
+    container_name: wq-emqx
+    restart: unless-stopped
+    environment:
+      TZ: "Asia/Shanghai"
+      # Dashboard 初始账号（${EMQX_DASHBOARD_PORT}），避免首次登录强制改密
+      EMQX_DASHBOARD__DEFAULT_USERNAME: "${EMQX_DASHBOARD_USER:-admin}"
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: "${EMQX_DASHBOARD_PASSWORD:-wendaoiot_dash}"
+      # 单节点
+      EMQX_NODE__NAME: "emqx@127.0.0.1"
+      EMQX_CLUSTER__DISCOVERY_STRATEGY: "manual"
+      EMQX_NODE__COOKIE: "${EMQX_NODE_COOKIE:-wqemqxcookie_local}"
+    ports:
+      - "${MQTT_PORT:-1883}:1883"          # MQTT 明文
+      - "${EMQX_DASHBOARD_PORT:-18083}:18083" # Dashboard
+      - "${MQTT_WS_PORT:-8083}:8083"       # MQTT over WS
+      - "${MQTT_WSS_PORT:-8084}:8084"      # MQTT over WSS
+      - "${MQTT_TLS_PORT:-8883}:8883"      # MQTT over TLS（证书生成后启用）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - wq-emqx-data:/opt/emqx/data
+      - ./certs:/opt/emqx/certs:ro
+      - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+
+volumes:
+  wq-mysql-data:
+  wq-emqx-data:

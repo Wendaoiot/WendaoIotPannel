@@ -34,11 +34,20 @@
         <el-button type="success" :loading="exporting" @click="handleExport">
           <el-icon><Download /></el-icon>&nbsp;导出CSV
         </el-button>
+        <template v-if="isSuperAdmin">
+          <el-button type="danger" plain :disabled="selectedRows.length === 0" @click="handleDeleteSelected">
+            删除选中<template v-if="selectedRows.length">({{ selectedRows.length }})</template>
+          </el-button>
+          <el-button type="danger" @click="handleClearFilter">
+            {{ hasActiveFilter ? '清空筛选日志' : '清空全部日志' }}
+          </el-button>
+        </template>
       </div>
     </div>
 
     <el-card class="table-card">
-      <el-table :data="filtered" v-loading="loading" stripe border max-height="calc(100vh - 300px)">
+      <el-table :data="filtered" v-loading="loading" stripe border max-height="calc(100vh - 300px)" @selection-change="onSelectionChange">
+        <el-table-column v-if="isSuperAdmin" type="selection" width="42" align="center" />
         <el-table-column prop="id" label="ID" width="80" align="center" />
         <el-table-column prop="device_id" label="设备ID" width="160" />
         <el-table-column prop="msg_id" label="消息ID" width="150" show-overflow-tooltip />
@@ -85,12 +94,23 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Download } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-import { getControlLogs, exportControlLogsCsv, type ControlLog, type ControlLogQuery } from '@/api/firmware'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getControlLogs, exportControlLogsCsv, deleteControlLogs, type ControlLog, type ControlLogQuery } from '@/api/firmware'
 import { formatTs } from '@/utils/datetime'
+import { useAuthStore } from '@/stores/auth'
 
 // 支持从设备控制页跳转时预填设备过滤（/iot/logs/control?device_id=xxx）
 const route = useRoute()
+const authStore = useAuthStore()
+const isSuperAdmin = computed(() => authStore.role === 'super_admin')
+const selectedRows = ref<ControlLog[]>([])
+
+function onSelectionChange(rows: ControlLog[]) {
+  selectedRows.value = rows
+}
+
+// 后端过滤条件（设备 + 时间范围）；状态过滤在前端完成，不计入删除范围
+const hasActiveFilter = computed(() => !!filterDeviceId.value || !!timeRange.value)
 
 const logs = ref<ControlLog[]>([])
 const total = ref(0)
@@ -135,6 +155,7 @@ async function fetchLogs() {
   } catch {
   } finally {
     loading.value = false
+    selectedRows.value = []
   }
 }
 
@@ -165,6 +186,49 @@ async function handleExport() {
   } catch {
   } finally {
     exporting.value = false
+  }
+}
+
+async function handleDeleteSelected() {
+  const ids = selectedRows.value.map(r => r.id)
+  if (ids.length === 0) return
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 条控制日志吗？此操作不可恢复。`, '确认删除', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    const res = await deleteControlLogs({ ids })
+    ElMessage.success(`已删除 ${res.data?.deleted ?? ids.length} 条日志`)
+    // 本页删空且非首页时回退一页，避免停留在空页
+    if (filtered.value.length === ids.length && currentPage.value > 1) currentPage.value--
+    fetchLogs()
+  } catch {
+  }
+}
+
+async function handleClearFilter() {
+  const q = buildQuery()
+  const statusNote = filterStatus.value ? '（注意：执行状态筛选仅前端生效，将删除该设备/时间范围内所有状态的日志）' : ''
+  const msg = hasActiveFilter.value
+    ? `将删除当前筛选条件下的全部控制日志（约 ${total.value} 条，包含未翻页部分），此操作不可恢复，是否继续？${statusNote}`
+    : '将清空【所有租户】的全部控制日志，此操作不可恢复，是否继续？'
+  try {
+    await ElMessageBox.confirm(msg, '危险操作', { type: 'warning', confirmButtonText: '确认清空', confirmButtonClass: 'el-button--danger' })
+  } catch {
+    return
+  }
+  try {
+    const res = await deleteControlLogs({
+      all: true,
+      device_id: q.device_id,
+      start: q.start,
+      end: q.end
+    })
+    ElMessage.success(`已删除 ${res.data?.deleted ?? 0} 条日志`)
+    currentPage.value = 1
+    fetchLogs()
+  } catch {
   }
 }
 

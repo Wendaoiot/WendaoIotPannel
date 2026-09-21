@@ -48,7 +48,69 @@
       </div>
     </div>
 
-    <div v-loading="loading" class="card-grid-wrap">
+    <!-- 列表视图：设备管理主页关闭“项目式管理”时，以表格列表展示全部设备 -->
+    <el-card v-if="useListView" v-loading="loading" class="table-card device-table-card">
+      <el-table
+        :data="pageItems"
+        stripe
+        border
+        class="device-table"
+        :empty-text="emptyText"
+        @row-click="goDetail"
+      >
+        <el-table-column label="状态" width="88">
+          <template #default="{ row }">
+            <span class="status-cell">
+              <span class="status-dot" :class="`is-${deviceState(row)}`" />
+              {{ statusText(row) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="设备名称" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="cell-name">{{ row.name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="设备 ID" min-width="130" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono">{{ row.id }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="!projectScoped && !hideProjectColumn" label="所属项目" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="cell-project">
+              <el-icon><Folder /></el-icon>{{ getProjectName(row.project_id) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="hasProductInPage" label="产品" width="120">
+          <template #default="{ row }">
+            <template v-if="isDynreg(row)">{{ productName(row.product_id!) }}</template>
+            <span v-else class="cell-muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="最后活跃" width="118" align="center">
+          <template #default="{ row }">
+            {{ isPending(row) ? '等待首次上线' : relativeActive(row.last_active) }}
+          </template>
+        </el-table-column>
+        <el-table-column v-if="!hideModeColumn" label="在线判定" min-width="130" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span :class="{ 'cell-mode': !!modeLabel(row) }">
+              {{ modeLabel(row) || '跟随系统默认' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="72" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" type="primary" link @click.stop="goDetail(row)">详情</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <!-- 卡片网格：项目内设备页 / 全部设备页沿用 -->
+    <div v-else v-loading="loading" class="card-grid-wrap">
       <div v-if="pageItems.length" class="device-grid">
           <article
             v-for="dev in pageItems"
@@ -184,6 +246,18 @@ import ProjectViewSwitch from '@/components/ProjectViewSwitch.vue'
 // withViewSwitch：在工具栏显示“项目式管理”持久化开关（设备管理主页用）。
 const props = withDefaults(defineProps<{ withViewSwitch?: boolean }>(), { withViewSwitch: false })
 const withViewSwitch = computed(() => props.withViewSwitch)
+
+// 列表视图：仅设备管理主页（带“项目式管理”开关，即已关闭项目式时）使用表格列表；
+// 项目内设备页与“全部设备”页沿用卡片网格。
+const useListView = computed(() => props.withViewSwitch)
+// 当前页存在产品设备时才显示“产品”列，避免一机一密场景下整列空白
+const hasProductInPage = computed(() => pageItems.value.some(d => isDynreg(d)))
+
+// 窄屏响应式：隐藏次要列，避免表格横向溢出（项目列可被工具栏筛选器替代；在线判定详情页可见）
+const winWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
+function onWinResize() { winWidth.value = window.innerWidth }
+const hideProjectColumn = computed(() => winWidth.value < 1200)
+const hideModeColumn = computed(() => winWidth.value < 1000)
 
 const router = useRouter()
 const route = useRoute()
@@ -520,6 +594,7 @@ watch(
 
 onMounted(() => {
   initView()
+  window.addEventListener('resize', onWinResize)
   offRealtime = onMessage((msg) => {
     const id = String(msg.data?.device_id ?? '')
     if (msg.type === 'device_activated') {
@@ -558,6 +633,7 @@ onUnmounted(() => {
   if (searchTimer) clearTimeout(searchTimer)
   offRealtime?.()
   offRealtime = null
+  window.removeEventListener('resize', onWinResize)
 })
 </script>
 
@@ -832,6 +908,67 @@ onUnmounted(() => {
 }
 
 .form-hint a {
+  color: var(--wd-primary);
+}
+
+/* ===== 列表视图（关闭项目式管理时） ===== */
+.device-table-card {
+  margin-top: 0;
+}
+
+.device-table-card :deep(.el-card__body) {
+  padding: 12px;
+}
+
+/* 整行可点击进入详情 */
+.device-table :deep(.el-table__row) {
+  cursor: pointer;
+}
+
+.status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--wd-text-regular);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--wd-text-placeholder);
+}
+
+.status-dot.is-online { background: var(--wd-success); }
+.status-dot.is-offline { background: var(--wd-text-placeholder); }
+.status-dot.is-pending { background: var(--wd-warning); }
+.status-dot.is-disabled { background: var(--wd-danger); }
+
+.cell-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--wd-text-primary);
+}
+
+.cell-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--wd-text-secondary);
+}
+
+.cell-project .el-icon {
+  flex-shrink: 0;
+}
+
+.cell-muted {
+  color: var(--wd-text-placeholder);
+}
+
+.cell-mode {
   color: var(--wd-primary);
 }
 </style>

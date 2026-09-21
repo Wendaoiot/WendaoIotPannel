@@ -16,125 +16,119 @@ This platform is developed by Wendaoiot and has been deployed in production envi
 
 **This project is licensed under the Apache 2.0 open-source license, allowing both commercial and non-commercial use.**
 
+## Documentation
+
+- [项目说明.md](./项目说明.md) (Chinese): architecture, multi-tenancy model, MQTT/HTTP protocol, device onboarding (per-device / per-product secret), online detection, OTA, D2D.
+- [部署与测试.md](./部署与测试.md) (Chinese): local one-click launch, production deployment, configuration reference, EMQX/TLS, automated tests.
+
+## Requirements
+
+| Dependency | Version | Purpose |
+| --- | --- | --- |
+| Go | 1.25+ | Backend build/run |
+| Node.js | 18+ | Frontend build (tested on v24) |
+| MySQL | 8.0+ | Business database (`wendaoiot`, utf8mb4) |
+| EMQX | 5.x (5.8 recommended) | MQTT broker with HTTP auth/ACL callbacks, REST session-kick, 8883 TLS |
+
+Docker Desktop is optional on the dev machine: [`deploy/docker/`](./deploy/docker/) provides a ready-to-use MySQL + EMQX Compose stack (secrets injected via `.env`).
+
 ## Project Structure
 
 ```
 wendaoiotpannel/
-├── server/              # Go Backend API (Gin + GORM + MQTT)
-├── web-admin/           # Vue3 + Element Plus Admin Panel (Tenant/Project/Device/OTA)
-├── web-app/             # uni-app (H5 + WeChat Mini Program) Client Display
-├── hardware/            # Air780EPM (LuatOS) Reference Firmware and Customer Demos (Supported Model)
+├── server/                 # Go backend (Gin + GORM + paho MQTT + JWT)
+│   ├── cmd/server/         # Entry point main.go (routes)
+│   ├── internal/
+│   │   ├── config/         # Config loading (config.yaml + WQ_ env vars)
+│   │   ├── model/          # GORM models and AutoMigrate
+│   │   ├── store/          # Data access (tenant scoping, soft/hard delete)
+│   │   ├── handler/        # HTTP API and EMQX auth/acl callbacks
+│   │   ├── mqtt/           # MQTT client, EMQX REST admin (session kick)
+│   │   ├── protocol/       # Topic and payload conventions
+│   │   ├── evaluate/       # Tag formula engine
+│   │   ├── metrics/        # Message metrics
+│   │   └── events/         # WebSocket event bus (per-tenant broadcast)
+│   ├── pkg/                # crypto (bcrypt/random password), token (JWT)
+│   └── config.example.yaml # Config template (copy to config.yaml)
+├── web-admin/              # Vue3 + Element Plus admin panel (:3000)
+├── web-app/                # uni-app (H5 + WeChat Mini Program) client (:3001)
+├── hardware/               # Air780EPM (LuatOS) reference firmware & demos
 │   └── 780epm_common/
-│       ├── core/        # Official Hezhou Firmware .soc (Required for demo flashing, included)
-│       └── project/     # 5 Customer Demos (0-5V/4-20mA/panel/rs485/ttl) + Internal Templates
-├── dev.ps1              # Windows One-Click Startup Script
-├── 提示词.md            # System Design / MQTT Protocol Specification
-└── 测试清单.md          # Integration Testing Steps
+│       ├── core/           # Official firmware .soc (included, needed to flash)
+│       └── project/        # demo_0_5v / demo_4_20ma / demo_panel / demo_rs485 / demo_ttl / pannel_demo*
+├── deploy/
+│   ├── docker/             # Docker Compose stack (MySQL + EMQX), secrets via .env
+│   └── linux/              # Linux bare-metal one-click deploy (no Docker), with systemd/Nginx templates
+├── 项目说明.md             # Detailed project guide (architecture & protocol)
+└── 部署与测试.md           # Deployment & testing manual
 ```
-
-## Prerequisites
-
-- Go 1.22+
-- Node.js 18+
-- MySQL 8.0+
-- EMQX or Mosquitto (MQTT Broker)
 
 ## Quick Start
 
-### 1. Create Database
-
-```sql
-CREATE DATABASE IF NOT EXISTS wendaoiot DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-### 2. Configure and Start MQTT Broker
-
-`server/config.yaml` defaults to connecting to the online platform `mqtt.broker: tcp://pannel.wendaoiot.com:1883` (no authentication; device identity = device ID, Air780EPM firmware uses module IMEI, other devices can use MAC/SN, etc.).
-
-- **Local Development**: Start EMQX or Mosquitto locally and change `mqtt.broker` to `tcp://127.0.0.1:1883`;
-- **Connect to Online**: Keep the default domain (requires server firewall to allow 1883/TCP).
-
-> Air780EPM reference firmware (`mqtt_wendao.lua` / `mqtt_main.lua` in `hardware/`) and the server both use `pannel.wendaoiot.com` by default. When connecting to your own platform, modify the corresponding address constants in the demo.
-
-### 3. Start Backend
-
 ```bash
-cd server
-go run ./cmd/server/
-# Or: go build -o server.exe ./cmd/server/ && ./server.exe
+# Backend (:8080; prepare server/config.yaml from config.example.yaml first)
+cd server && go run ./cmd/server/
+
+# Admin panel (:3000)
+cd web-admin && npm install && npm run dev
+
+# Client H5 (:3001/iot/)
+cd web-app && npm install && npm run dev:h5
 ```
 
-Default port is 8080. Database (MySQL, default `127.0.0.1:3306`, root without password) and MQTT addresses are configured in `server/config.yaml`.
+Windows one-click local launch (Docker brings up MySQL+EMQX, configures the auth chain, starts frontend & backend): run `tools/local/up.bat`.
+Default super admin is `admin / admin123`. For full steps, production deployment, and EMQX/TLS configuration, see [部署与测试.md](./部署与测试.md).
 
-> ⚠️ `config.yaml` is the **development default configuration** (includes disclosed `jwt_secret`, empty database/MQTT passwords). For production deployment, directly modify the database password, `jwt_secret`, and other sensitive items before starting. **Do not commit production passwords back to the public repository** (add the file to local untracked changes, or overwrite the file separately during deployment).
+## HTTP API Endpoints
 
-### 4. Start Admin Panel
+Base path `/api/v1`. Every endpoint except the public ones requires header `Authorization: Bearer <token>`. Roles: **SA** = super_admin, **TA** = tenant_admin.
 
-```bash
-cd web-admin
-npm install
-npm run dev
-```
+| Method | Path | Description | Role |
+| --- | --- | --- | --- |
+| GET | `/health` | Health check | Public |
+| POST | `/login` | Login, returns JWT | Public |
+| POST | `/mqtt/auth` | EMQX device auth callback (X-Auth-Key) | Public |
+| POST | `/mqtt/acl` | EMQX device ACL callback (X-Auth-Key) | Public |
+| GET | `/ws` | WebSocket realtime push (token in query) | Any |
+| GET/PUT | `/me/preferences` | Current account UI preferences | Any |
+| GET | `/dashboard/stats` | Dashboard statistics | Any |
+| GET | `/dashboard/traffic` | Message traffic series | Any |
+| POST/GET | `/tenants` | Create/list tenants | SA |
+| PUT/DELETE | `/tenants/:id` | Update/delete tenant (cascade) | SA |
+| POST/GET | `/projects` | Create/list projects | Any |
+| GET | `/projects/device-stats` | Per-project device counts | Any |
+| GET | `/projects/:id/data` | Project aggregated data | Any |
+| PUT | `/projects/:id`, `/projects/:id/settings` | Edit project / settings | Any |
+| POST | `/projects/:id/apply-online-default` | Apply default online rule | Any |
+| DELETE | `/projects/:id` | Delete project (cascade) | Any |
+| GET/POST/DELETE | `/projects/:id/tags` | Project tags | Any |
+| GET/POST | `/projects/:id/commands` | List/create custom control commands | Any |
+| PUT/DELETE | `/commands/:id` | Update/delete custom control command | Any |
+| POST/GET | `/products`, `PUT/DELETE /products/:key` | Products (per-product secret) CRUD | Any |
+| POST | `/products/:key/secret/reset` | Rotate product secret (shown once) | Any |
+| POST | `/devices/batch-preregister` | Batch pre-register SNs (≤500) | Any |
+| POST/GET | `/devices`, `/devices/page` | Create / list / paged search devices | Any |
+| GET/PUT/DELETE | `/devices/:deviceId` | Detail / update / delete (cascade) | Any |
+| PUT | `/devices/:deviceId/enabled` | Enable/disable (disable kicks session) | Any |
+| POST | `/devices/:deviceId/secret/reset` | Reset per-device secret | Any |
+| POST | `/devices/:deviceId/reactivate` | Re-allow dynamic registration | Any |
+| GET/POST/DELETE | `/devices/:deviceId/tags` | Device tag configuration | Any |
+| GET | `/devices/:deviceId/data` | Device historical data | Any |
+| DELETE | `/devices/:deviceId/data` | Delete device data | SA |
+| POST | `/devices/:deviceId/control` | Send control command | Any |
+| GET | `/devices/:deviceId/control/:msgId` | Query control command status | Any |
+| GET | `/devices/:deviceId/peer/messages` | Device-to-device message trail | Any |
+| GET/POST | `/peer/allows`, `DELETE /peer/allows/:id` | Cross-tenant whitelist | Any |
+| GET/POST | `/firmwares`, `DELETE /firmwares/:id` | Firmware management (URL must be https) | Any |
+| GET | `/firmwares/latest` | Latest firmware by device/version | Any |
+| POST/GET | `/ota/tasks` | Create/list OTA tasks | Any |
+| GET/DELETE | `/ota/logs` | Query/delete OTA logs (delete SA) | Any |
+| GET/DELETE | `/control-logs` | Query/delete control logs (delete SA) | Any |
+| GET | `/users` | User list | Any |
+| PUT | `/users/password` | Change own password | Any |
+| PUT/DELETE | `/users/:id/password`, `/users/:id` | Reset user password / delete user | SA |
 
-Open http://localhost:3000
-
-### 5. Start Client H5
-
-```bash
-cd web-app
-npm install
-npm run dev:h5
-```
-
-Open http://localhost:3001?project_id=1
-
-(Online access URLs are in the "Online Platform" link at the top)
-
-> 💡 For device-side simulation/testing, use MQTTX to connect to the broker and publish
-> manually, or refer to the Air780EPM reference firmware under `hardware/` for real-device verification.
-
-## Default Accounts
-
-> ⚠️ The following are **development/demo default credentials**, only for local initialization. For production deployment, immediately change the super admin and tenant admin passwords, and replace `jwt_secret` in `server/config.yaml` (this repository is public, default values are disclosed).
-
-| Role              | Username | Password |
-| ----------------- | -------- | -------- |
-| Super Administrator | admin    | admin123 |
-| Tenant Administrator | tenant1  | 123456   |
-
-## API Endpoints
-
-| Method           | Path                          | Description                 |
-| ---------------- | ----------------------------- | --------------------------- |
-| POST             | `/api/v1/login`             | Login (public)              |
-| GET              | `/api/v1/dashboard/stats`   | Dashboard Statistics        |
-| POST/GET         | `/api/v1/tenants`           | Tenant Management           |
-| POST/GET         | `/api/v1/projects`          | Project Management          |
-| GET              | `/api/v1/projects/:id/data` | Project Aggregated Data     |
-| POST/GET/DELETE  | `/api/v1/projects/:id/tags` | Project Tags                |
-| POST/GET         | `/api/v1/devices`           | Device Management           |
-| POST/GET/DELETE  | `/api/v1/devices/:id/tags`  | Device Tag Configuration    |
-| GET              | `/api/v1/devices/:id/data`  | Device Historical Data      |
-| POST             | `/api/v1/devices/:id/control` | Send Control Command      |
-
-## MQTT Topics
-
-| Topic                             | Description                             |
-| --------------------------------- | --------------------------------------- |
-| `wendao/{deviceId}/data`        | Device reports data (upstream)          |
-| `wendao/{deviceId}/data/ack`    | Server response (downstream)            |
-| `wendao/{deviceId}/control`     | Server sends control command (downstream) |
-| `wendao/{deviceId}/control/ack` | Device responds with control result (upstream) |
-
-For complete topic conventions (including status / rs485 / uart / ota, etc.), see `提示词.md`.
-
-## Reference Device Firmware (Air780EPM / hardware)
-
-The platform device-side uses standard MQTT protocol (topic `wendao/{deviceId}/...`). Any module/MCU supporting MQTT can access (device ID can be IMEI/MAC/SN, etc.); the `hardware/` directory contains reference firmware and customer demos for the Hezhou Air780EPM (LuatOS) model.
-
-- Customer demos are located in `hardware/780epm_common/project/` (`demo_0_5v`, `demo_4_20ma`, `demo_panel`, `demo_rs485`, `demo_ttl`), each with an independent `readme.md`.
-- Air780EPM firmware defaults to connecting to `pannel.wendaoiot.com:1883`, device identity uses module IMEI (no username/password); to connect to your own platform, modify `HOST`/`PORT`/`TOPIC_PREFIX` at the top of `mqtt_wendao.lua` in the demo.
-- Flashing: Use Luatools, select the official firmware `.soc` from `core/` and download together with the project directory scripts.
+> Unified response: `{ "code": 0, "msg": "ok", "data": ... }`; non-zero `code` means a business error. For MQTT topics, payloads, and device credentials, see [项目说明.md](./项目说明.md).
 
 ## License
 

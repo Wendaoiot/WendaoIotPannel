@@ -9,132 +9,126 @@ WendaoIotPannel 是一个开源的通用物联网系统 SAAS 平台，提供完�
 这个平台由 Wendaoiot（闻道物联）研发，已被用于智慧水务、智慧农业、智慧养殖、智慧城市等多个行业的生产环境。
 
 - 设备端走标准 MQTT 协议接入；合宙 Air780EPM（LuatOS）是已适配型号之一，参考固件见 `hardware/`。后端 Go + 前端 Vue3/uni-app。
-- 线上平台：[http://pannel.wendaoiot.com/iot](http://pannel.wendaoiot.com/iot) ｜ 健康检查：[http://pannel.wendaoiot.com/api/v1/health](http://pannel.wendaoiot.com/api/v1/health)
+- 线上平台：[http://pannel.wendaoiot.com/iot](http://pannel.wendaoiot.com/iot) 
 - 代码仓库：
   - Gitee：[https://gitee.com/wendaoiot/WendaoIotPannel](https://gitee.com/wendaoiot/WendaoIotPannel)
   - GitHub：[https://github.com/Wendaoiot/WendaoIotPannel](https://github.com/Wendaoiot/WendaoIotPannel)
 
 **本项目采用 Apache 2.0 开源协议，允许任何商业和非商业使用。**
 
+## 文档
+
+- [项目说明.md](./项目说明.md)：系统架构、多租户模型、MQTT/HTTP 协议、设备接入（一机一密 / 一型一密）、在线判定、OTA、D2D。
+- [部署与测试.md](./部署与测试.md)：本地一键启动、生产部署、配置项、EMQX/TLS、自动化测试。
+
+## 环境依赖
+
+| 依赖 | 版本 | 用途 |
+| --- | --- | --- |
+| Go | 1.25+ | 后端编译运行 |
+| Node.js | 18+ | 前端构建（实测 v24） |
+| MySQL | 8.0+ | 业务数据库（库名 `wendaoiot`，utf8mb4） |
+| EMQX | 5.x（推荐 5.8） | MQTT Broker，HTTP 认证/ACL 回调、REST 互踢、8883 TLS |
+
+开发机可选 Docker Desktop：[`deploy/docker/`](./deploy/docker/) 提供开箱即用的 MySQL + EMQX Compose 栈（密钥经 `.env` 注入）。
+
 ## 项目结构
 
 ```
 wendaoiotpannel/
-├── server/              # Go 后端 API（Gin + GORM + MQTT）
-├── web-admin/           # Vue3 + Element Plus 管理后台（租户/项目/设备/OTA）
-├── web-app/             # uni-app（H5 + 微信小程序）C 端展示
-├── hardware/            # Air780EPM（LuatOS）参考固件与客户 demo（已适配型号之一）
+├── server/                 # Go 后端（Gin + GORM + paho MQTT + JWT）
+│   ├── cmd/server/         # 程序入口 main.go（路由注册）
+│   ├── internal/
+│   │   ├── config/         # 配置加载（config.yaml + WQ_ 环境变量）
+│   │   ├── model/          # GORM 模型与 AutoMigrate
+│   │   ├── store/          # 数据访问层（多租户作用域、软/物理删除）
+│   │   ├── handler/        # HTTP 接口与 EMQX auth/acl 回调
+│   │   ├── mqtt/           # MQTT 客户端、EMQX REST 管理（互踢）
+│   │   ├── protocol/       # Topic 与报文约定
+│   │   ├── evaluate/       # 标签公式引擎
+│   │   ├── metrics/        # 消息指标
+│   │   ├── events/         # WebSocket 事件总线（按租户广播）
+│   ├── pkg/                # crypto（bcrypt/随机密码）、token（JWT）
+│   └── config.example.yaml # 配置模板（复制为 config.yaml）
+├── web-admin/              # Vue3 + Element Plus 管理后台（:3000）
+├── web-app/                # uni-app（H5 + 微信小程序）C 端（:3001）
+├── hardware/               # Air780EPM（LuatOS）参考固件与客户 demo
 │   └── 780epm_common/
-│       ├── core/        # 合宙官方固件 .soc（烧录 demo 必需，已入库）
-│       └── project/     # 5 个客户 demo（0-5V/4-20mA/panel/rs485/ttl）+ 内部模板
-├── dev.ps1              # Windows 一键启动脚本
-├── 提示词.md            # 系统设计 / MQTT 协议说明
-└── 测试清单.md          # 联调测试步骤
+│       ├── core/           # 合宙官方固件 .soc（已入库，烧录必需）
+│       └── project/        # demo_0_5v / demo_4_20ma / demo_panel / demo_rs485 / demo_ttl / pannel_demo 系列
+├── deploy/
+│   ├── docker/             # Docker Compose 栈（MySQL + EMQX），密钥经 .env 注入
+│   └── linux/              # 无 Docker 的 Linux 裸机一键部署（脚本 + systemd/Nginx 模板）
+├── 项目说明.md             # 详细项目说明（架构与协议）
+└── 部署与测试.md           # 部署与测试手册
 ```
 
-## 前置条件
-
-- Go 1.22+
-- Node.js 18+
-- MySQL 8.0+
-- EMQX 或 Mosquitto (MQTT Broker)
-
-## 快速启动
-
-### 1. 创建数据库
-
-```sql
-CREATE DATABASE IF NOT EXISTS wendaoiot DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-```
-
-### 2. 配置并启动 MQTT Broker
-
-`server/config.yaml` 默认连接线上平台 `mqtt.broker: tcp://pannel.wendaoiot.com:1883`（无认证；设备身份 = 设备ID，Air780EPM 固件取模组 IMEI，其他设备可用 MAC/SN 等）。
-
-- **本地联调**：在本机启动 EMQX 或 Mosquitto，并把 `mqtt.broker` 改为 `tcp://127.0.0.1:1883`；
-- **连线上**：保持默认域名即可（需服务器放行 1883/TCP）。
-
-> Air780EPM 参考固件（`hardware/` 下各 `mqtt_wendao.lua` / `mqtt_main.lua`）与服务器默认均使用域名 `pannel.wendaoiot.com`，切换自有平台时改对应地址常量即可。
-
-### 3. 启动后端
+## 本地快速启动
 
 ```bash
-cd server
-go run ./cmd/server/
-# 或者: go build -o server.exe ./cmd/server/ && ./server.exe
+# 后端（默认 :8080，先按 config.example.yaml 准备 server/config.yaml）
+cd server && go run ./cmd/server/
+
+# 管理后台（:3000）
+cd web-admin && npm install && npm run dev
+
+# C 端 H5（:3001/iot/）
+cd web-app && npm install && npm run dev:h5
 ```
 
-默认端口 8080。数据库（MySQL，默认 `127.0.0.1:3306`，root 无密码）与 MQTT 地址均在 `server/config.yaml` 中配置。
+Windows 本地一键启动（Docker 起 MySQL+EMQX、配置认证链、拉起前后端）：运行 `tools/local/up.bat`。
+默认超管 `admin / admin123`。完整步骤、生产部署、EMQX/TLS 配置见 [部署与测试.md](./部署与测试.md)。
 
-> ⚠️ `config.yaml` 是**开发默认配置**（含已公开的 `jwt_secret`、空数据库/ MQTT 密码）。生产部署请直接修改其中的数据库密码、`jwt_secret` 等敏感项后再启动，**不要把生产密码提交回公开仓库**（对应文件可加入本地未跟踪改动，或部署时单独覆盖文件）。
+## HTTP API 接口列表
 
-### 4. 启动管理后台
+基址 `/api/v1`。除「公开」接口外均需请求头 `Authorization: Bearer <token>`。角色：**超管** = super_admin，**租户** = tenant_admin。
 
-```bash
-cd web-admin
-npm install
-npm run dev
-```
+| 方法 | 路径 | 说明 | 权限 |
+| --- | --- | --- | --- |
+| GET | `/health` | 健康检查 | 公开 |
+| POST | `/login` | 登录，返回 JWT | 公开 |
+| POST | `/mqtt/auth` | EMQX 设备认证回调（X-Auth-Key） | 公开 |
+| POST | `/mqtt/acl` | EMQX 设备授权回调（X-Auth-Key） | 公开 |
+| GET | `/ws` | WebSocket 实时推送（query 带 token） | 登录 |
+| GET/PUT | `/me/preferences` | 当前账号 UI 偏好 | 登录 |
+| GET | `/dashboard/stats` | 仪表盘统计 | 登录 |
+| GET | `/dashboard/traffic` | 消息流量曲线 | 登录 |
+| POST/GET | `/tenants` | 新建/列出租户 | 超管 |
+| PUT/DELETE | `/tenants/:id` | 修改/删除租户（级联） | 超管 |
+| POST/GET | `/projects` | 新建/列出项目 | 登录 |
+| GET | `/projects/device-stats` | 各项目设备数量角标 | 登录 |
+| GET | `/projects/:id/data` | 项目聚合数据 | 登录 |
+| PUT | `/projects/:id` `/projects/:id/settings` | 编辑项目 / 项目设置 | 登录 |
+| POST | `/projects/:id/apply-online-default` | 套用在线判定默认值 | 登录 |
+| DELETE | `/projects/:id` | 删除项目（级联） | 登录 |
+| GET/POST/DELETE | `/projects/:id/tags` | 项目标签（列表/新增/删除） | 登录 |
+| GET/POST | `/projects/:id/commands` | 项目自定义控制命令列表/新增 | 登录 |
+| PUT/DELETE | `/commands/:id` | 修改/删除自定义控制命令 | 登录 |
+| POST/GET | `/products`、`PUT/DELETE /products/:key` | 产品（一型一密）CRUD | 登录 |
+| POST | `/products/:key/secret/reset` | 轮换产品密钥（明文仅一次） | 登录 |
+| POST | `/devices/batch-preregister` | 批量预录 SN（≤500） | 登录 |
+| POST/GET | `/devices`、`/devices/page` | 新建设备 / 全量 / 分页检索 | 登录 |
+| GET/PUT/DELETE | `/devices/:deviceId` | 设备详情 / 编辑 / 删除（级联） | 登录 |
+| PUT | `/devices/:deviceId/enabled` | 启用/禁用（禁用即踢线） | 登录 |
+| POST | `/devices/:deviceId/secret/reset` | 重置一机一密密钥 | 登录 |
+| POST | `/devices/:deviceId/reactivate` | 产品设备重新允许动态注册 | 登录 |
+| GET/POST/DELETE | `/devices/:deviceId/tags` | 设备标签配置 | 登录 |
+| GET | `/devices/:deviceId/data` | 设备历史数据 | 登录 |
+| DELETE | `/devices/:deviceId/data` | 删除设备数据 | 超管 |
+| POST | `/devices/:deviceId/control` | 下发控制指令 | 登录 |
+| GET | `/devices/:deviceId/control/:msgId` | 查询控制指令状态 | 登录 |
+| GET | `/devices/:deviceId/peer/messages` | 设备间通信留痕 | 登录 |
+| GET/POST | `/peer/allows`、`DELETE /peer/allows/:id` | 跨租户白名单授权 | 登录 |
+| GET/POST | `/firmwares`、`DELETE /firmwares/:id` | 固件管理（URL 必须 https） | 登录 |
+| GET | `/firmwares/latest` | 按设备/版本取最新固件 | 登录 |
+| POST/GET | `/ota/tasks` | 创建/列出 OTA 任务 | 登录 |
+| GET/DELETE | `/ota/logs` | 查询/删除 OTA 日志（删仅超管） | 登录 |
+| GET/DELETE | `/control-logs` | 查询/删除控制日志（删仅超管） | 登录 |
+| GET | `/users` | 用户列表 | 登录 |
+| PUT | `/users/password` | 修改自身密码 | 登录 |
+| PUT/DELETE | `/users/:id/password`、`/users/:id` | 重置用户密码 / 删除用户 | 超管 |
 
-打开 http://localhost:3000
-
-### 5. 启动 C端 H5
-
-```bash
-cd web-app
-npm install
-npm run dev:h5
-```
-
-打开 http://localhost:3001?project_id=1
-
-（线上访问地址见顶部「线上平台」链接）
-
-> 💡 设备端模拟/联调可使用 MQTTX 连接 broker 手动上报，或参考 `hardware/` 下
-> Air780EPM 参考固件直接在真机上验证。
-
-## 默认账号
-
-> ⚠️ 以下为**开发/演示默认口令**，仅用于本地初始化。生产部署务必立即修改超级管理员与租户管理员密码，并更换 `server/config.yaml` 中的 `jwt_secret`（本仓库为公开仓库，默认值已公开）。
-
-| 角色       | 用户名  | 密码     |
-| ---------- | ------- | -------- |
-| 超级管理员 | admin   | admin123 |
-| 租户管理员 | tenant1 | 123456   |
-
-## API 接口
-
-| 方法            | 路由                            | 说明         |
-| --------------- | ------------------------------- | ------------ |
-| POST            | `/api/v1/login`               | 登录 (公开)  |
-| GET             | `/api/v1/dashboard/stats`     | 仪表盘统计   |
-| POST/GET        | `/api/v1/tenants`             | 租户管理     |
-| POST/GET        | `/api/v1/projects`            | 项目管理     |
-| GET             | `/api/v1/projects/:id/data`   | 项目聚合数据 |
-| POST/GET/DELETE | `/api/v1/projects/:id/tags`   | 项目标签     |
-| POST/GET        | `/api/v1/devices`             | 设备管理     |
-| POST/GET/DELETE | `/api/v1/devices/:id/tags`    | 设备标签配置 |
-| GET             | `/api/v1/devices/:id/data`    | 设备历史数据 |
-| POST            | `/api/v1/devices/:id/control` | 下发控制指令 |
-
-## MQTT Topic
-
-| Topic                             | 说明                    |
-| --------------------------------- | ----------------------- |
-| `wendao/{deviceId}/data`        | 设备上报数据 (上行)     |
-| `wendao/{deviceId}/data/ack`    | 服务端回复 (下行)       |
-| `wendao/{deviceId}/control`     | 服务端下发控制 (下行)   |
-| `wendao/{deviceId}/control/ack` | 设备回复控制结果 (上行) |
-
-完整 topic 约定（含 status / rs485 / uart / ota 等）见 `提示词.md`。
-
-## 参考设备端固件（Air780EPM / hardware）
-
-平台设备侧为标准 MQTT 协议（主题 `wendao/{deviceId}/...`），任意支持 MQTT 的模组/MCU 均可接入（设备ID 可为 IMEI/MAC/SN 等）；`hardware/` 目录是合宙 Air780EPM（LuatOS）这一型号的参考固件与客户 demo。
-
-- 客户 demo 位于 `hardware/780epm_common/project/`（`demo_0_5v`、`demo_4_20ma`、`demo_panel`、`demo_rs485`、`demo_ttl`），各工程内有独立 `readme.md`。
-- Air780EPM 固件默认连接 `pannel.wendaoiot.com:1883`，设备身份取模组 IMEI（无用户名密码）；接自有平台时改 demo 内 `mqtt_wendao.lua` 顶部 `HOST`/`PORT`/`TOPIC_PREFIX`。
-- 烧录：用 Luatools，选择 `core/` 下的官方固件 `.soc` + 工程目录脚本一起下载。
+> 统一响应 `{ "code": 0, "msg": "ok", "data": ... }`，`code != 0` 为业务失败。MQTT Topic 与报文、设备接入凭据见 [项目说明.md](./项目说明.md)。
 
 ## 开源协议
 

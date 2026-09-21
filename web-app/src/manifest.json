@@ -61,6 +61,12 @@
   "mp-toutiao": {
     "usingComponents": true
   },
+  "h5": {
+    "router": {
+      "mode": "hash",
+      "base": "/iot/"
+    }
+  },
   "uniStatistics": {
     "enable": false
   },

@@ -7,6 +7,7 @@ server/vendor/
 # Node
 node_modules/
 dist/
+*.tsbuildinfo
 *.log
 .DS_Store
 
@@ -22,6 +23,14 @@ Thumbs.db
 # Tools: entire directory is local-only, not tracked
 tools/local/
 docs/
+
+# Docker stack: secrets, local env and generated certs not tracked
+deploy/docker/.env
+deploy/docker/emqx_api.env
+deploy/docker/certs/
+
+# Linux bare-metal: local deploy config not tracked
+deploy/linux/deploy.env
 
 # Config with secrets
 *.local.yaml

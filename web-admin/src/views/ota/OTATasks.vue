@@ -31,8 +31,20 @@
     </el-card>
 
     <el-card v-if="selectedTaskId" class="table-card">
-      <template #header>升级日志 (任务ID: {{ selectedTaskId }})</template>
-      <el-table :data="logs" v-loading="logsLoading" stripe border size="small">
+      <template #header>
+        <div class="logs-header">
+          <span>升级日志 (任务ID: {{ selectedTaskId }})</span>
+          <span v-if="isSuperAdmin" class="logs-actions">
+            <el-button size="small" type="danger" plain :disabled="selectedLogs.length === 0" @click="handleDeleteSelectedLogs">
+              删除选中<template v-if="selectedLogs.length">({{ selectedLogs.length }})</template>
+            </el-button>
+            <el-button size="small" type="danger" @click="handleClearTaskLogs">清空本任务日志</el-button>
+          </span>
+        </div>
+      </template>
+      <el-table :data="logs" v-loading="logsLoading" stripe border size="small" @selection-change="onLogSelectionChange">
+        <el-table-column v-if="isSuperAdmin" type="selection" width="42" align="center" />
+        <el-table-column prop="id" label="ID" width="70" align="center" />
         <el-table-column prop="device_id" label="设备ID" width="160" />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
@@ -46,6 +58,11 @@
         </el-table-column>
         <el-table-column prop="error_msg" label="错误信息" show-overflow-tooltip />
         <el-table-column prop="updated_at" label="更新时间" width="170" />
+        <el-table-column v-if="isSuperAdmin" label="操作" width="80" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" type="danger" link @click="handleDeleteLog(row)">删除</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </el-card>
 
@@ -75,10 +92,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { getFirmwares, getOTATasks, getOTALogs, createOTATask } from '@/api/firmware'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { getFirmwares, getOTATasks, getOTALogs, createOTATask, deleteOTALogs } from '@/api/firmware'
 import type { Firmware, OTATask, OTALog } from '@/api/firmware'
+import { useAuthStore } from '@/stores/auth'
+
+const authStore = useAuthStore()
+const isSuperAdmin = computed(() => authStore.role === 'super_admin')
+const selectedLogs = ref<OTALog[]>([])
+
+function onLogSelectionChange(rows: OTALog[]) {
+  selectedLogs.value = rows
+}
 
 const tasks = ref<OTATask[]>([])
 const firmwares = ref<Firmware[]>([])
@@ -126,7 +152,50 @@ async function selectTask(row: OTATask) {
 async function fetchLogs() {
   if (!selectedTaskId.value) return
   logsLoading.value = true
-  try { logs.value = (await getOTALogs(selectedTaskId.value)).data || [] } catch { } finally { logsLoading.value = false }
+  try { logs.value = (await getOTALogs(selectedTaskId.value)).data || [] } catch { } finally { logsLoading.value = false; selectedLogs.value = [] }
+}
+
+async function handleDeleteLog(row: OTALog) {
+  try {
+    await ElMessageBox.confirm(`确定删除设备 "${row.device_id}" 在任务 ${selectedTaskId.value} 中的升级日志吗？`, '确认删除', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await deleteOTALogs({ ids: [row.id] })
+    ElMessage.success('日志已删除')
+    fetchLogs()
+  } catch { }
+}
+
+async function handleDeleteSelectedLogs() {
+  const ids = selectedLogs.value.map(l => l.id)
+  if (ids.length === 0) return
+  try {
+    await ElMessageBox.confirm(`确定删除选中的 ${ids.length} 条升级日志吗？此操作不可恢复。`, '确认删除', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    const res = await deleteOTALogs({ ids })
+    ElMessage.success(`已删除 ${res.data?.deleted ?? ids.length} 条日志`)
+    fetchLogs()
+  } catch { }
+}
+
+async function handleClearTaskLogs() {
+  try {
+    await ElMessageBox.confirm(`将清空任务 ${selectedTaskId.value} 下的全部升级日志（仅日志，不删除任务），此操作不可恢复，是否继续？`, '危险操作', {
+      type: 'warning', confirmButtonText: '确认清空', confirmButtonClass: 'el-button--danger'
+    })
+  } catch {
+    return
+  }
+  try {
+    const res = await deleteOTALogs({ task_id: selectedTaskId.value })
+    ElMessage.success(`已删除 ${res.data?.deleted ?? 0} 条日志`)
+    fetchLogs()
+  } catch { }
 }
 
 function showTaskDialog() { dialogVisible.value = true }
@@ -146,3 +215,15 @@ async function handleCreate() {
 
 onMounted(() => { fetchFirmwares(); fetchTasks() })
 </script>
+
+<style scoped>
+.logs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.logs-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+</style>

@@ -201,6 +201,8 @@ func main() {
 		auth.DELETE("/commands/:id", h.DeleteControlCommand)
 
 		auth.GET("/control-logs", h.ListControlLogs)
+		// 控制日志删除：仅超管（按行 ID / 设备+时间范围 / 清空）
+		auth.DELETE("/control-logs", handler.RequireRole(model.RoleSuperAdmin), h.DeleteControlLogs)
 
 		// 设备间通信（D2D）
 		auth.GET("/devices/:deviceId/peer/messages", h.ListPeerMessages)
@@ -216,6 +218,8 @@ func main() {
 		auth.POST("/ota/tasks", h.CreateOTATask)
 		auth.GET("/ota/tasks", h.ListOTATasks)
 		auth.GET("/ota/logs", h.GetOTALogs)
+		// OTA 升级日志删除：仅超管（按行 ID / 按任务清空 / 清空全部），不删任务本身
+		auth.DELETE("/ota/logs", handler.RequireRole(model.RoleSuperAdmin), h.DeleteOTALogs)
 
 		auth.GET("/users", h.ListUsers)
 		auth.PUT("/users/password", h.ChangePassword)

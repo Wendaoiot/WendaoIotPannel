@@ -4,8 +4,11 @@ package crypto
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"math/big"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -43,6 +46,23 @@ func MustHashPassword(pwd string) string {
 // CheckPassword 校验明文密码是否匹配 bcrypt 哈希。
 func CheckPassword(hashed, pwd string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hashed), []byte(pwd)) == nil
+}
+
+// IsLegacySHA256 判断哈希是否为历史遗留的「裸 SHA-256」（64 位小写 hex，
+// 无 bcrypt 的 $2a$/$2b$ 前缀）。用于从旧版本平滑迁移。
+func IsLegacySHA256(hashed string) bool {
+	h := strings.TrimSpace(hashed)
+	if len(h) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(h)
+	return err == nil
+}
+
+// CheckLegacySHA256 校验明文密码的裸 SHA-256 是否与旧哈希相等（大小写无关）。
+func CheckLegacySHA256(hashed, pwd string) bool {
+	sum := sha256.Sum256([]byte(pwd))
+	return strings.EqualFold(strings.TrimSpace(hashed), hex.EncodeToString(sum[:]))
 }
 
 // PasswordPolicyDisabled 系统按要求不限制管理员密码强度（仅要求非空）。
