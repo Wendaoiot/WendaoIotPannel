@@ -245,7 +245,7 @@ func (h *Handler) SetDeviceEnabled(c *gin.Context) {
 	if !req.Enabled {
 		// 禁用：立即向在线连接下发原因（wendao/{id}/kicked，reason=disabled）并踢除，
 		// 不必等设备下次重连；启用不触碰现有连接。未配置 EMQX API 时仅通知不踢（静默降级）。
-		notifyAndKick(deviceID, "disabled", "设备已被管理员禁用，本连接被平台断开")
+		notifyAndKick(deviceID, "", "disabled", "设备已被管理员禁用，本连接被平台断开", true)
 		// 兜底：无论 EMQX 踢线是否成功，立即广播一次离线状态，前端无需等待断开事件/手动刷新。
 		if h.bus != nil {
 			if dev, err := h.store.GetDevice(deviceID); err == nil && dev.TenantID != 0 {

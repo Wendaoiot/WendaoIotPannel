@@ -71,10 +71,11 @@ func (a *EMQXAdmin) listClientsByUsername(username string) ([]emqxClientItem, er
 	return out.Data, nil
 }
 
-// KickDeviceSessions 踢掉某设备（username）当前的全部在线会话，返回被踢的 clientid 列表。
-// 认证回调阶段调用：新连接尚未注册完成，此时列表里的全是旧连接，全部踢掉即"新踢旧"。
+// KickDeviceSessions 踢掉某设备（username）当前的在线会话，返回被踢的 clientid 列表。
+// excludeClientID 为新连接自身的 clientid：异步执行时新连接可能已注册，必须排除以免踢到自己；
+// 传空则踢掉全部（禁用/reactivate 场景）。
 // 被踢连接会触发 EMQX disconnected 系统事件，平台在线状态由现有 $SYS 逻辑自动回收。
-func (a *EMQXAdmin) KickDeviceSessions(username string) ([]string, error) {
+func (a *EMQXAdmin) KickDeviceSessions(username, excludeClientID string) ([]string, error) {
 	if !a.Enabled() {
 		return nil, nil
 	}
@@ -84,7 +85,7 @@ func (a *EMQXAdmin) KickDeviceSessions(username string) ([]string, error) {
 	}
 	var kicked []string
 	for _, cl := range clients {
-		if cl.ClientID == "" {
+		if cl.ClientID == "" || cl.ClientID == excludeClientID {
 			continue
 		}
 		if err := a.deleteClient(cl.ClientID); err != nil {

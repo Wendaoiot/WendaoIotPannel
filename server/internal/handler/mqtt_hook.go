@@ -20,8 +20,9 @@ func SetMQTTAuthSecret(s string) {
 }
 
 // SessionKicker 互踢能力（由 mqtt.Client 实现；未配置 EMQX API 时为 nil）。
+// excludeClientID 用于新登录时排除新连接自身，避免异步踢线误踢自己。
 type SessionKicker interface {
-	KickDeviceSessions(deviceID string) ([]string, error)
+	KickDeviceSessions(deviceID, excludeClientID string) ([]string, error)
 }
 
 // KickedNotifier 被踢通知能力：主动断开前向设备发布原因（由 mqtt.Client 实现）。
@@ -48,21 +49,23 @@ func SetKickedNotifier(n KickedNotifier) {
 // 消息不持久化，此宽限是其收到原因的唯一窗口；clean session=false 重连后仍可补收）。
 var kickNoticeGrace = 600 * time.Millisecond
 
-// notifyAndKick 先向设备发布断开原因（若通知器可用），再执行互踢。
-// 通知失败只记日志，不影响踢出流程；kicker 未注入则仅通知不踢。
-func notifyAndKick(deviceID, reason, msg string) {
-	if kickedNotifier != nil {
+// notifyAndKick 向设备发布断开原因（sendNotice=true）并执行踢线。
+// excludeClientID 用于新登录异步踢线时排除新连接自身，传空踢全部。
+// sendNotice=false 时只踢线（原因已在调用前另行发送，避免重复通知）。
+// 通知失败只记日志，不影响踢出流程。
+func notifyAndKick(deviceID, excludeClientID, reason, msg string, sendNotice bool) {
+	if sendNotice && kickedNotifier != nil {
 		kickedNotifier.NotifyKicked(deviceID, reason, msg)
 	}
 	if kickNoticeGrace > 0 {
 		time.Sleep(kickNoticeGrace)
 	}
 	if sessionKicker != nil {
-		kicked, err := sessionKicker.KickDeviceSessions(deviceID)
+		kicked, err := sessionKicker.KickDeviceSessions(deviceID, excludeClientID)
 		if err != nil {
-			log.Printf("mqtt auth: kick old sessions for %s failed: %v", deviceID, err)
+			log.Printf("kick sessions for %s failed: %v", deviceID, err)
 		} else if len(kicked) > 0 {
-			log.Printf("mqtt auth: kicked %d old session(s) of device %s: %v", len(kicked), deviceID, kicked)
+			log.Printf("kicked %d session(s) of %s: %v", len(kicked), deviceID, kicked)
 		}
 	}
 }
@@ -131,11 +134,16 @@ func (h *Handler) EMQXAuthenticate(c *gin.Context) {
 		return
 	}
 
-	// 同设备重复连接互踢：认证已通过，此时新连接尚未注册完成，
-	// 先向旧连接发布被踢原因（wendao/{id}/kicked，QoS1 持久化、重连可收），
-	// 再全部踢掉（"新踢旧"）。踢失败仅记日志不拒绝登录。
-	notifyAndKick(req.Username, "new_login",
-		"同一设备的新连接已通过认证，本连接被平台断开（互踢）")
+	// 同设备重复连接互踢。关键：踢线（MQTT 通知 + EMQX REST）绝不能阻塞认证响应，
+	// 否则会超过 EMQX 的认证超时导致登录失败（本次排查的 SECRET 超时根因）。
+	// 此刻新连接尚未订阅 kicked，同步把原因发给仍订阅它的旧会话；随后立即放行，
+	// 再异步经 EMQX REST 删除旧连接，并排除本次新连接 clientid 以免踢到自己。
+	msg := "同一设备的新连接已通过认证，本连接被平台断开（互踢）"
+	if kickedNotifier != nil {
+		kickedNotifier.NotifyKicked(req.Username, "new_login", msg)
+	}
+	deviceID, clientID := req.Username, req.ClientID
+	go notifyAndKick(deviceID, clientID, "new_login", msg, false)
 
 	c.JSON(http.StatusOK, gin.H{"result": "allow", "is_superuser": false})
 }

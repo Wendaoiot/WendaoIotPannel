@@ -334,7 +334,7 @@ func (h *Handler) ReactivateDevice(c *gin.Context) {
 		return
 	}
 	// 在线设备：旧密钥已失效，主动通知并踢线，促使其重新走引导注册。
-	notifyAndKick(deviceID, "reactivated", "设备已被管理员重置为待激活，本连接被平台断开")
+	notifyAndKick(deviceID, "", "reactivated", "设备已被管理员重置为待激活，本连接被平台断开", true)
 	if h.bus != nil && dev.TenantID != 0 {
 		h.bus.BroadcastToTenant(dev.TenantID, events.Message{
 			Type: "device_status",

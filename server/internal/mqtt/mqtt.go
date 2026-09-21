@@ -91,9 +91,10 @@ func (c *Client) SetEMQXAdmin(a *EMQXAdmin) {
 	c.emqx = a
 }
 
-// KickDeviceSessions 踢掉某设备当前的全部在线会话（互踢入口，供认证回调调用）。
-func (c *Client) KickDeviceSessions(deviceID string) ([]string, error) {
-	return c.emqx.KickDeviceSessions(deviceID)
+// KickDeviceSessions 踢掉某设备当前的在线会话（互踢入口）。
+// excludeClientID 为新连接自身，须排除；传空踢全部。
+func (c *Client) KickDeviceSessions(deviceID, excludeClientID string) ([]string, error) {
+	return c.emqx.KickDeviceSessions(deviceID, excludeClientID)
 }
 
 // NotifyKicked 主动断开某设备前，向 wendao/{id}/kicked 发布断开原因（QoS1）。
@@ -639,7 +640,7 @@ func (c *Client) kickBootstrap(sn, productKey string) {
 		return
 	}
 	bootstrapUsername := sn + protocol.BootstrapSep + productKey
-	kicked, err := c.emqx.KickDeviceSessions(bootstrapUsername)
+	kicked, err := c.emqx.KickDeviceSessions(bootstrapUsername, "")
 	if err != nil {
 		log.Printf("mqtt dynreg: kick bootstrap %s failed: %v", bootstrapUsername, err)
 		return
