@@ -21,8 +21,8 @@ export function isExplicitMode(mode?: string | null): mode is OnlineModeValue {
 }
 
 /**
- * 三层继承解析设备实际生效的在线判定模式：设备显式值 -> 项目默认 -> 系统默认。
- * 任一层为空串/'default'/未知值即回退到下一层。
+ * 解析设备实际生效的在线判定模式：设备显式值 -> 项目默认 -> 仅按连接。
+ * 任一层为空串/未知值即回退到下一层（最终即「仅按连接」）。
  */
 export function resolveOnlineMode(
   deviceMode?: string | null,
@@ -64,8 +64,8 @@ export function onlineModeText(mode?: string | null, timeoutSec = 0): string {
 }
 
 /**
- * 三层继承后的完整生效文案（设备设置页用）：
- * 设备未显式设置时展示其跟随来源（项目默认/系统默认）与解析后的模式、时限。
+ * 完整生效文案（设备详情页用）：直接展示解析后的模式与时限。
+ * 历史遗留的空串值按「仅按连接」归一，不在界面上暴露继承概念。
  */
 export function effectiveOnlineModeText(
   deviceMode?: string | null,
@@ -74,13 +74,12 @@ export function effectiveOnlineModeText(
   projectTimeoutSec = 0,
   systemTimeoutSec = 0
 ): string {
+  const mode = resolveOnlineMode(deviceMode, projectMode)
+  let timeout = 0
   if (isExplicitMode(deviceMode)) {
-    const t = deviceTimeoutSec > 0 ? deviceTimeoutSec : (isExplicitMode(projectMode) && projectTimeoutSec > 0 ? projectTimeoutSec : systemTimeoutSec)
-    return onlineModeText(deviceMode, t)
+    timeout = deviceTimeoutSec > 0 ? deviceTimeoutSec : (isExplicitMode(projectMode) && projectTimeoutSec > 0 ? projectTimeoutSec : systemTimeoutSec)
+  } else if (isExplicitMode(projectMode)) {
+    timeout = projectTimeoutSec > 0 ? projectTimeoutSec : systemTimeoutSec
   }
-  if (isExplicitMode(projectMode)) {
-    const t = projectTimeoutSec > 0 ? projectTimeoutSec : systemTimeoutSec
-    return `跟随项目默认（${onlineModeText(projectMode, t)}）`
-  }
-  return '跟随系统默认'
+  return onlineModeText(mode, timeout)
 }

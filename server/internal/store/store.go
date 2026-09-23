@@ -786,8 +786,13 @@ func (s *Store) CreateOTALog(log *model.OTALog) error {
 }
 
 func (s *Store) ListOTALogs(taskID uint) ([]model.OTALog, error) {
+	// taskID=0 表示不按任务过滤，返回全部升级日志（管理端“全部日志”查询）。
+	q := s.db.Model(&model.OTALog{})
+	if taskID > 0 {
+		q = q.Where("task_id = ?", taskID)
+	}
 	var logs []model.OTALog
-	err := s.db.Where("task_id = ?", taskID).Order("id").Find(&logs).Error
+	err := q.Order("id").Find(&logs).Error
 	return logs, err
 }
 

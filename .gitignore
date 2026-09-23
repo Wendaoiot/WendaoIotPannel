@@ -3,6 +3,11 @@ server/server.exe
 server/*.exe
 server/*.exe~
 server/vendor/
+# Local dev restart helpers (hardcoded dev password / runtime marker)
+server/restart_server.bat
+server/start_once.bat
+server/restart_status.marker
+server/server_run.log
 
 # Node
 node_modules/
@@ -22,7 +27,8 @@ Thumbs.db
 
 # Tools: entire directory is local-only, not tracked
 tools/local/
-docs/
+# docs/: local-only by default, except the public device access guide
+docs/*
 
 # Docker stack: secrets, local env and generated certs not tracked
 deploy/docker/.env

@@ -27,12 +27,8 @@
         </el-form-item>
         <el-form-item label="在线判定">
           <el-radio-group v-model="form.onlineMode" class="mode-radios">
-            <el-radio value="" border>跟随项目默认</el-radio>
             <el-radio v-for="m in ONLINE_MODES" :key="m.value" :value="m.value" border>{{ m.label }}</el-radio>
           </el-radio-group>
-          <div v-if="form.onlineMode === ''" class="field-hint effective-hint">
-            当前项目默认：{{ projectDefaultText }}
-          </div>
         </el-form-item>
         <el-form-item v-if="form.onlineMode === 'report' || form.onlineMode === 'ping'" label="判定离线时限">
           <div class="timeout-box">
@@ -50,7 +46,7 @@
               {{ form.onlineMode === 'report'
                 ? '设备连接 broker 即在线；超过此时长未上报任何数据则判离线（设备保持连接也会判离线）。'
                 : '平台周期性发送探活，设备须回应答信号；超过此时长未收到应答则判离线。需要设备固件支持 ping 应答（常供电设备适用，休眠设备不适用）。' }}
-              全为 0 表示沿用项目/系统默认时限；最长 7 天。
+              全为 0 表示沿用项目默认时限；最长 7 天。
             </span>
           </div>
         </el-form-item>
@@ -107,7 +103,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getDevice, updateDevice, deleteDevice, setDeviceEnabled, resetDeviceSecret, reactivateDevice, type Device } from '@/api/device'
 import { getProjects, type Project } from '@/api/project'
 import { useAuthStore } from '@/stores/auth'
-import { ONLINE_MODES, onlineModeText, type OnlineModeValue } from '@/utils/onlineMode'
+import { ONLINE_MODES, normalizeOnlineMode, type OnlineModeValue } from '@/utils/onlineMode'
 
 const route = useRoute()
 const router = useRouter()
@@ -126,10 +122,10 @@ const isDynreg = computed(() => (device.value?.product_id ?? 0) > 0)
 const isPending = computed(() => isDynreg.value && !device.value?.activated_at)
 
 // 基本信息 + 在线判定统一表单
-const form = reactive<{ name: string; projectId: number; onlineMode: OnlineModeValue | '' }>({
+const form = reactive<{ name: string; projectId: number; onlineMode: OnlineModeValue }>({
   name: '',
   projectId: 1,
-  onlineMode: ''
+  onlineMode: 'connection'
 })
 const snapshot = ref('')
 // 时限（天/时/分/秒）——与秒互转
@@ -180,7 +176,7 @@ async function fetchProjects() {
 function syncForms(d: Device | null) {
   form.name = d?.name || ''
   form.projectId = d?.project_id || 0
-  form.onlineMode = (d?.online_mode || '') as OnlineModeValue | ''
+  form.onlineMode = normalizeOnlineMode(d?.online_mode)
   snapshot.value = JSON.stringify({ n: form.name, p: form.projectId, m: form.onlineMode })
 
   Object.assign(timeout, secToParts(d?.offline_timeout_sec || 0))
@@ -190,17 +186,9 @@ function syncForms(d: Device | null) {
 function resetForm() {
   form.name = device.value?.name || ''
   form.projectId = device.value?.project_id || 0
-  form.onlineMode = (device.value?.online_mode || '') as OnlineModeValue | ''
+  form.onlineMode = normalizeOnlineMode(device.value?.online_mode)
   Object.assign(timeout, secToParts(device.value?.offline_timeout_sec || 0))
 }
-
-// 当前所选项目的在线判定默认文案（设备选择“跟随项目默认”时展示）
-const projectDefaultText = computed(() => {
-  const p = projects.value.find(item => item.id === form.projectId)
-  if (!p) return '—'
-  if (!p.online_mode) return '跟随系统默认'
-  return onlineModeText(p.online_mode, p.offline_timeout_sec)
-})
 
 async function save() {
   if (!device.value || !form.name.trim()) {
@@ -390,11 +378,6 @@ watch(deviceId, fetchDevice)
   font-size: 12px;
   color: var(--wd-text-secondary);
   line-height: 1.6;
-}
-.effective-hint {
-  display: block;
-  width: 100%;
-  margin-top: 6px;
 }
 
 .danger-panel {

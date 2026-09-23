@@ -2,7 +2,9 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
-  history: createWebHistory('/iot/'), // 新增
+  // 管理后台部署在根域，history base 必须为 '/'；
+  // '/iot/' 只属于 C 端 web-app，绝不能在这里设置，否则两前端路由冲突。
+  history: createWebHistory('/'),
   routes: [
     {
       path: '/login',

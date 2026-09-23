@@ -33,8 +33,8 @@ http.interceptors.response.use(response => {
     if (status === 401) {
       localStorage.removeItem('token')
       localStorage.removeItem('user')
-      // 应用 base 为 /iot/，跳转需带上前缀
-      window.location.href = '/iot/login'
+      // 管理后台部署在根域（base 为 /），'/iot/' 属于 C 端 H5，勿混用
+      window.location.href = '/login'
       ElMessage.error('登录已过期，请重新登录')
     } else if (status === 403) {
       ElMessage.error('没有权限执行此操作')

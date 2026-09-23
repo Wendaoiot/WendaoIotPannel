@@ -9,7 +9,7 @@ WendaoIotPannel is an open-source general-purpose IoT system SaaS platform that 
 This platform is developed by Wendaoiot and has been deployed in production environments across multiple industries, including smart water management, smart agriculture, smart aquaculture, and smart cities.
 
 - Device-side uses standard MQTT protocol for access, without device model restrictions (device ID can be module IMEI, MAC, SN, etc.); Hezhou Air780EPM (LuatOS) is one of the supported models. Reference firmware is available in `hardware/`. Backend: Go + Frontend: Vue3/uni-app.
-- Online Platform: http://pannel.wendaoiot.com/iot ｜ Health Check: http://pannel.wendaoiot.com/api/v1/health
+- Online Platform: Admin console http://pannel.wendaoiot.com/login | Customer H5: http://pannel.wendaoiot.com/iot | Docs wiki: http://wiki.wendaoiot.com ｜ Health Check: http://pannel.wendaoiot.com/api/v1/health
 - Code Repositories:
   - Gitee: https://gitee.com/wendaoiot/WendaoIotPannel
   - GitHub: https://github.com/Wendaoiot/WendaoIotPannel
@@ -18,6 +18,7 @@ This platform is developed by Wendaoiot and has been deployed in production envi
 
 ## Documentation
 
+- [设备接入指南.md](./设备接入指南.md) (Chinese): device-side onboarding guide — connection params, uplink/downlink payloads, ping keepalive, OTA, D2D and error codes.
 - [项目说明.md](./项目说明.md) (Chinese): architecture, multi-tenancy model, MQTT/HTTP protocol, device onboarding (per-device / per-product secret), online detection, OTA, D2D.
 - [部署与测试.md](./部署与测试.md) (Chinese): local one-click launch, production deployment, configuration reference, EMQX/TLS, automated tests.
 
@@ -59,6 +60,7 @@ wendaoiotpannel/
 ├── deploy/
 │   ├── docker/             # Docker Compose stack (MySQL + EMQX), secrets via .env
 │   └── linux/              # Linux bare-metal one-click deploy (no Docker), with systemd/Nginx templates
+├── 设备接入指南.md         # Device onboarding guide (protocol & payloads)
 ├── 项目说明.md             # Detailed project guide (architecture & protocol)
 └── 部署与测试.md           # Deployment & testing manual
 ```

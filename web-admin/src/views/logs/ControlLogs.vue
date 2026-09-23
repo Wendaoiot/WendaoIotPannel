@@ -99,7 +99,7 @@ import { getControlLogs, exportControlLogsCsv, deleteControlLogs, type ControlLo
 import { formatTs } from '@/utils/datetime'
 import { useAuthStore } from '@/stores/auth'
 
-// 支持从设备控制页跳转时预填设备过滤（/iot/logs/control?device_id=xxx）
+// 支持从设备控制页跳转时预填设备过滤（/logs/control?device_id=xxx）
 const route = useRoute()
 const authStore = useAuthStore()
 const isSuperAdmin = computed(() => authStore.role === 'super_admin')

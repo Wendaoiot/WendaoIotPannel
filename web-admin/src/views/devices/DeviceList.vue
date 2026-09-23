@@ -97,7 +97,7 @@
         <el-table-column v-if="!hideModeColumn" label="在线判定" min-width="130" show-overflow-tooltip>
           <template #default="{ row }">
             <span :class="{ 'cell-mode': !!modeLabel(row) }">
-              {{ modeLabel(row) || '跟随系统默认' }}
+              {{ modeLabel(row) || '仅按连接' }}
             </span>
           </template>
         </el-table-column>
@@ -525,7 +525,7 @@ async function handleCreate() {
         `<div style="line-height:1.9;font-size:13px">`
         + `接入用户名（设备ID）：<b>${sn}</b><br/>`
         + `接入密码（密钥）：<b>${secret}</b><br/>`
-        + `Broker：tcp://127.0.0.1:1883`
+        + `Broker：tcp://pannel.wendaoiot.com:1883`
         + `</div><br/>用户名严格区分大小写；该密钥<b>仅此一次显示</b>，请妥善保存并配置到设备。`,
         '设备接入凭证', { dangerouslyUseHTMLString: true, confirmButtonText: '我已保存', type: 'success' }
       )

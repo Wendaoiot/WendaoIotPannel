@@ -9,7 +9,7 @@ WendaoIotPannel 是一个开源的通用物联网系统 SAAS 平台，提供完�
 这个平台由 Wendaoiot（闻道物联）研发，已被用于智慧水务、智慧农业、智慧养殖、智慧城市等多个行业的生产环境。
 
 - 设备端走标准 MQTT 协议接入；合宙 Air780EPM（LuatOS）是已适配型号之一，参考固件见 `hardware/`。后端 Go + 前端 Vue3/uni-app。
-- 线上平台：[http://pannel.wendaoiot.com/iot](http://pannel.wendaoiot.com/iot) 
+- 线上平台：管理后台 [http://pannel.wendaoiot.com/login](http://pannel.wendaoiot.com/login) ｜ C 端 H5 [http://pannel.wendaoiot.com/iot](http://pannel.wendaoiot.com/iot) ｜ 资料站 [http://wiki.wendaoiot.com](http://wiki.wendaoiot.com)
 - 代码仓库：
   - Gitee：[https://gitee.com/wendaoiot/WendaoIotPannel](https://gitee.com/wendaoiot/WendaoIotPannel)
   - GitHub：[https://github.com/Wendaoiot/WendaoIotPannel](https://github.com/Wendaoiot/WendaoIotPannel)
@@ -18,6 +18,7 @@ WendaoIotPannel 是一个开源的通用物联网系统 SAAS 平台，提供完�
 
 ## 文档
 
+- [设备接入指南.md](./设备接入指南.md)：面向端侧开发者——连接参数、上行/下行报文、ping 应答、OTA、D2D 与错误码。
 - [项目说明.md](./项目说明.md)：系统架构、多租户模型、MQTT/HTTP 协议、设备接入（一机一密 / 一型一密）、在线判定、OTA、D2D。
 - [部署与测试.md](./部署与测试.md)：本地一键启动、生产部署、配置项、EMQX/TLS、自动化测试。
 

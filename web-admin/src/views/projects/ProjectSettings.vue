@@ -75,7 +75,7 @@
         <section class="panel">
           <h3 class="panel-title">设备在线判定默认</h3>
           <el-alert type="info" :closable="false" show-icon class="ps-alert"
-            title="新项目设备与本项目中未单独配置的设备按此默认判定在线状态；设备可在“设备设置”中选“跟随项目默认”或显式覆盖。" />
+            title="新设备与未单独设置的存量设备按此默认判定在线状态；设备可在“设备设置”中单独修改判定方式。" />
           <el-form label-width="92px" class="ps-form">
             <el-form-item label="判定方式">
               <el-radio-group v-model="onlineForm.mode">

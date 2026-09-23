@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"time"
 	"wendaoiotpannel/internal/model"
 
@@ -29,10 +30,14 @@ func (s *Store) UpdateAdminUserPasswordAndBump(id uint, hashedPassword string) e
 }
 
 // GetAdminUserUIOptions 返回某账号原始 UI 偏好 JSON 串（空串=全部默认）。
+// ui_options 允许 NULL（从未保存过偏好的账号，如 admin）：NULL 按空串处理，不报错。
 func (s *Store) GetAdminUserUIOptions(id uint) (string, error) {
-	var opts string
-	err := s.db.Model(&model.AdminUser{}).Where("id = ?", id).Pluck("ui_options", &opts).Error
-	return opts, err
+	var opts sql.NullString
+	err := s.db.Raw("SELECT ui_options FROM admin_users WHERE id = ?", id).Scan(&opts).Error
+	if err != nil {
+		return "", err
+	}
+	return opts.String, nil
 }
 
 // UpdateAdminUserUIOptions 保存某账号原始 UI 偏好 JSON 串。
@@ -149,12 +154,21 @@ func (s *Store) ApplyControlAck(msgID string, code int, msg string) error {
 	if code != 0 {
 		status = model.ControlStatusFailed
 	}
-	return s.db.Model(&model.ControlLog{}).Where("msg_id = ?", msgID).
+	res := s.db.Model(&model.ControlLog{}).Where("msg_id = ?", msgID).
 		Updates(map[string]interface{}{
 			"ack_code": code,
 			"ack_msg":  msg,
 			"status":   status,
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	// 没有任何指令匹配该 msg_id：回执 id 为平台未知，上层应答 code=3。
+	// GORM Updates 匹配 0 行时 Error 仍为 nil，必须显式检查 RowsAffected。
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // MarkControlTimeout 将超过阈值仍未得到 ack 的指令标记为超时。

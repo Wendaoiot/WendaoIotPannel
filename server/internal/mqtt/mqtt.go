@@ -30,6 +30,11 @@ type Client struct {
 	cfg    Config
 	emqx   *EMQXAdmin
 	mu     sync.RWMutex
+
+	// initialConns 计数 CONNECT 成功次数：首次连接由 main 显式 Subscribe 负责，
+	// OnConnect 跳过以避免与显式订阅同一组主题并发（曾导致 subscribe token 永不完成）；
+	// 之后的断线重连才在 OnConnect 中自动 resubscribe。
+	initialConns int
 }
 
 // EMQX 5.x 系统事件主题（sys_event_messages 默认开启 connected/disconnected）。
@@ -48,7 +53,15 @@ func New(cfg Config, s *store.Store, bus *events.Bus) (*Client, error) {
 		SetResumeSubs(true).
 		SetCleanSession(false).
 		SetOnConnectHandler(func(_ mqtt.Client) {
-			c.resubscribe()
+			// 加锁计数：仅第 2 次及以后的连接（断线重连）自动补订阅；
+			// 首次连接的订阅由 main 的 Subscribe 同步负责，避免并发重复订阅。
+			c.mu.Lock()
+			c.initialConns++
+			isReconnect := c.initialConns > 1
+			c.mu.Unlock()
+			if isReconnect {
+				c.resubscribe()
+			}
 		})
 
 	if cfg.Username != "" {
