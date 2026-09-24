@@ -13,10 +13,9 @@ import (
 
 type Config struct {
 	Server struct {
-		Port           int      `yaml:"port"`
-		JWT            string   `yaml:"jwt_secret"`
-		CorsOrigins    []string `yaml:"cors_origins"`
-		MQTTAuthSecret string   `yaml:"mqtt_auth_secret"` // EMQX 认证/ACL 回调共享密钥
+		Port        int      `yaml:"port"`
+		JWT         string   `yaml:"jwt_secret"`
+		CorsOrigins []string `yaml:"cors_origins"`
 	} `yaml:"server"`
 	MySQL struct {
 		Host     string `yaml:"host"`
@@ -26,11 +25,18 @@ type Config struct {
 		Database string `yaml:"database"`
 	} `yaml:"mysql"`
 	MQTT struct {
-		Broker   string `yaml:"broker"`
-		ClientID string `yaml:"client_id"`
-		Username string `yaml:"username"`
-		Password string `yaml:"password"`
+		ClientID string `yaml:"client_id"` // 服务端 paho 回环连接的 client id
 	} `yaml:"mqtt"`
+	// 内嵌 MQTT broker（mochi-mqtt，进程内替代外部 EMQX）。
+	Broker struct {
+		ListenPort      int    `yaml:"listen_port"`      // MQTT TCP 端口（1883；0=禁用）
+		TLSPort         int    `yaml:"tls_port"`         // MQTT over TLS 端口（8883；0=禁用）
+		TLSCert         string `yaml:"tls_cert"`         // TLS 证书路径
+		TLSKey          string `yaml:"tls_key"`          // TLS 私钥路径
+		PersistencePath string `yaml:"persistence_path"` // pebble 持久化目录（空=禁用）
+		ServerUsername  string `yaml:"server_username"`  // 平台自身 MQTT 账号（paho 回环）
+		ServerPassword  string `yaml:"server_password"`  // 平台自身 MQTT 密码
+	} `yaml:"broker"`
 	Device struct {
 		// OnlineMode 设备在线判定模式：
 		//   connection — 按 MQTT 连接判定：connected=在线 / disconnected=离线，
@@ -47,13 +53,6 @@ type Config struct {
 		ScanIntervalSec   int    `yaml:"scan_interval_sec"`   // 离线检测扫描周期
 		PingIntervalSec   int    `yaml:"ping_interval_sec"`   // ping 模式探活发送周期（秒）
 	} `yaml:"device"`
-	// EMQX REST API（互踢：同设备重复建连时踢掉同 username 的旧会话）。
-	// APIKey/APISecret 为空时互踢功能静默禁用（仅打日志），不影响启动。
-	EMQX struct {
-		APIBase   string `yaml:"api_base"`   // 如 http://127.0.0.1:18083
-		APIKey    string `yaml:"api_key"`    // EMQX Dashboard 创建的 API Key
-		APISecret string `yaml:"api_secret"` // 与 API Key 配对的 Secret
-	} `yaml:"emqx"`
 }
 
 func (c *Config) MySQLDSN() string {
@@ -93,6 +92,21 @@ func Load(path string) (*Config, error) {
 	if cfg.MQTT.ClientID == "" {
 		cfg.MQTT.ClientID = "wendao_server"
 	}
+	// 内嵌 broker 默认值：端口默认开 1883；TLS 证书齐全时自动开 8883，否则保持关闭
+	if cfg.Broker.ListenPort == 0 {
+		cfg.Broker.ListenPort = 1883
+	}
+	if cfg.Broker.TLSPort == 0 && cfg.Broker.TLSCert != "" && cfg.Broker.TLSKey != "" {
+		cfg.Broker.TLSPort = 8883
+	}
+	if cfg.Broker.ServerUsername == "" {
+		cfg.Broker.ServerUsername = "wendao_server"
+	}
+	// 本地开发（WQ_INSECURE=1）且未配置平台 MQTT 密码时回退为同账密，便于快速起服务。
+	if cfg.Broker.ServerPassword == "" && insecureInternal() {
+		cfg.Broker.ServerPassword = cfg.Broker.ServerUsername
+		log.Println("config: WQ_INSECURE 开启且 broker.server_password 未配置，回环账密同用户名（勿用于生产）")
+	}
 	// 设备在线判定模式：校验取值并归一化（applyEnv 已先执行，环境变量同样受此校验）
 	switch strings.ToLower(strings.TrimSpace(cfg.Device.OnlineMode)) {
 	case "", "connection":
@@ -129,13 +143,18 @@ func Load(path string) (*Config, error) {
 }
 
 // insecure 为 true 时跳过密钥强度校验，仅供本地开发/测试。
-func (c *Config) insecure() bool {
+func insecureInternal() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("WQ_INSECURE"))) {
 	case "1", "true", "yes", "on":
 		return true
 	default:
 		return false
 	}
+}
+
+// insecure 为 true 时跳过密钥强度校验，仅供本地开发/测试（Validate 与默认值回退共用）。
+func (c *Config) insecure() bool {
+	return insecureInternal()
 }
 
 // Validate 校验启动期必须满足的安全配置。密钥缺失/为默认弱值/过短均拒绝启动。
@@ -153,6 +172,18 @@ func (c *Config) Validate() error {
 	case len(secret) < 16:
 		return errors.New("server.jwt_secret 长度至少需要 16 位（或设置 WQ_INSECURE=1 仅供本地测试）")
 	}
+	// 内嵌 broker 平台账号密码：生产必须强配置（paho 回环 + 认证分支均依赖）
+	switch {
+	case c.Broker.ServerPassword == "":
+		return errors.New("broker.server_password 未配置：请在 config.yaml 或环境变量 WQ_BROKER_SERVER_PASSWORD 设置强随机密码（本地临时测试可设 WQ_INSECURE=1）")
+	case weakSecrets[c.Broker.ServerPassword]:
+		return fmt.Errorf("broker.server_password 使用了不安全的默认值 %q，请更换为强随机密码", c.Broker.ServerPassword)
+	case len(c.Broker.ServerPassword) < 16:
+		return errors.New("broker.server_password 长度至少需要 16 位")
+	}
+	if c.Broker.TLSPort > 0 && (c.Broker.TLSCert == "" || c.Broker.TLSKey == "") {
+		return errors.New("broker.tls_port 已开启但 tls_cert/tls_key 未配置")
+	}
 	return nil
 }
 
@@ -166,8 +197,34 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("WQ_JWT_SECRET"); v != "" {
 		c.Server.JWT = v
 	}
-	if v := os.Getenv("WQ_MQTT_AUTH_SECRET"); v != "" {
-		c.Server.MQTTAuthSecret = v
+	if v := os.Getenv("WQ_MQTT_CLIENT_ID"); v != "" {
+		c.MQTT.ClientID = v
+	}
+	// 内嵌 broker 配置（环境变量优先）
+	if v := os.Getenv("WQ_BROKER_LISTEN_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Broker.ListenPort = n
+		}
+	}
+	if v := os.Getenv("WQ_BROKER_TLS_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Broker.TLSPort = n
+		}
+	}
+	if v := os.Getenv("WQ_BROKER_TLS_CERT"); v != "" {
+		c.Broker.TLSCert = v
+	}
+	if v := os.Getenv("WQ_BROKER_TLS_KEY"); v != "" {
+		c.Broker.TLSKey = v
+	}
+	if v := os.Getenv("WQ_BROKER_PERSISTENCE_PATH"); v != "" {
+		c.Broker.PersistencePath = v
+	}
+	if v := os.Getenv("WQ_BROKER_SERVER_USERNAME"); v != "" {
+		c.Broker.ServerUsername = v
+	}
+	if v := os.Getenv("WQ_BROKER_SERVER_PASSWORD"); v != "" {
+		c.Broker.ServerPassword = v
 	}
 	c.Server.CorsOrigins = appendEnvv(c.Server.CorsOrigins, os.Getenv("WQ_CORS_ORIGINS"))
 
@@ -189,19 +246,6 @@ func (c *Config) applyEnv() {
 		c.MySQL.Database = v
 	}
 
-	if v := os.Getenv("WQ_MQTT_BROKER"); v != "" {
-		c.MQTT.Broker = v
-	}
-	if v := os.Getenv("WQ_MQTT_CLIENT_ID"); v != "" {
-		c.MQTT.ClientID = v
-	}
-	if v := os.Getenv("WQ_MQTT_USERNAME"); v != "" {
-		c.MQTT.Username = v
-	}
-	if v := os.Getenv("WQ_MQTT_PASSWORD"); v != "" {
-		c.MQTT.Password = v
-	}
-
 	if v := os.Getenv("WQ_DEVICE_ONLINE_MODE"); v != "" {
 		c.Device.OnlineMode = v
 	}
@@ -219,16 +263,6 @@ func (c *Config) applyEnv() {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Device.PingIntervalSec = n
 		}
-	}
-
-	if v := os.Getenv("WQ_EMQX_API_BASE"); v != "" {
-		c.EMQX.APIBase = v
-	}
-	if v := os.Getenv("WQ_EMQX_API_KEY"); v != "" {
-		c.EMQX.APIKey = v
-	}
-	if v := os.Getenv("WQ_EMQX_API_SECRET"); v != "" {
-		c.EMQX.APISecret = v
 	}
 }
 

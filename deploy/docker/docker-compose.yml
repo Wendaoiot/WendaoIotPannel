@@ -1,33 +1,82 @@
-# WendaoIotPannel 本地/单机容器栈
-# - MySQL 8.0 : 宿主 127.0.0.1:${MYSQL_PORT}，库名由 MYSQL_DATABASE 指定（默认 wendaoiot），utf8mb4
-# - EMQX 5.8 : MQTT 1883 / mqtts 8883 / WS 8083 / WSS 8084 / Dashboard 18083
-#               HTTP 认证/ACL 回调指向宿主机 Go server：
-#               http://host.docker.internal:${SERVER_PORT}/api/v1/mqtt/{auth,acl}
+# WendaoIotPannel 生产容器栈（EMQX 已移除：MQTT broker 内嵌进 wendao 容器）
+#
+# 拓扑（详见 docs/容器化部署运维手册.md）：
+#   wendao : Go 后端 :8080（不对宿主暴露，仅网内）+ 内嵌 MQTT broker 1883/8883
+#   mysql  : MySQL 8.0（仅网内，命名卷持久化）
+#   nginx  : web-admin + wiki 静态站 + 反代 wendao:8080（对外 80）
 #
 # 用法：
-#   1) cp .env.example .env   # 按需修改密码
-#   2) ./gen-certs.sh         # Windows PowerShell: ./gen-certs.ps1（生成 8883 证书）
-#   3) docker compose up -d
-#   4) ./configure-emqx.sh    # Windows PowerShell: ./configure-emqx.ps1（配置认证/ACL 链）
-# 清库重来： docker compose down -v
+#   1) cp .env.example .env   # 或用 gen-secrets.sh 生成强密钥
+#   2) ./gen-certs.sh         # 生成 8883 证书（产物 certs/）
+#   3) docker compose build
+#   4) docker compose up -d
 #
-# 所有密码均可在 .env 中覆盖；括号内为仅用于本机开发的默认值。
+# 清库重来： docker compose down -v（会删除数据库与 broker 会话数据）
 
 services:
+  wendao:
+    build:
+      context: ../../server
+      dockerfile: Dockerfile
+    image: wendao/server:latest
+    container_name: wq-wendao
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      TZ: "Asia/Shanghai"
+      # ---- HTTP ----
+      WQ_SERVER_PORT: "8080"
+      WQ_JWT_SECRET: "${WQ_JWT_SECRET}"
+      WQ_CORS_ORIGINS: "${WQ_CORS_ORIGINS:-https://pannel.wendaoiot.com}"
+      # ---- MySQL（网内服务名直连）----
+      WQ_MYSQL_HOST: "mysql"
+      WQ_MYSQL_PORT: "3306"
+      WQ_MYSQL_USER: "wendao"
+      WQ_MYSQL_PASSWORD: "${MYSQL_APP_PASSWORD}"
+      WQ_MYSQL_DATABASE: "${MYSQL_DATABASE:-wendaoiot}"
+      # ---- 内嵌 broker ----
+      WQ_MQTT_CLIENT_ID: "${WQ_MQTT_CLIENT_ID:-wendao_server}"
+      WQ_BROKER_LISTEN_PORT: "${MQTT_PORT:-1883}"
+      WQ_BROKER_TLS_PORT: "${MQTT_TLS_PORT:-8883}"
+      WQ_BROKER_TLS_CERT: "/etc/wendao/certs/server.crt"
+      WQ_BROKER_TLS_KEY: "/etc/wendao/certs/server.key"
+      WQ_BROKER_PERSISTENCE_PATH: "/data/broker"
+      WQ_BROKER_SERVER_USERNAME: "${WQ_BROKER_SERVER_USERNAME:-wendao_server}"
+      WQ_BROKER_SERVER_PASSWORD: "${WQ_BROKER_SERVER_PASSWORD}"
+      # ---- 首次启动管理员引导（仅首次生效，之后可从 .env 移除）----
+      WQ_ADMIN_USERNAME: "${WQ_ADMIN_USERNAME:-admin}"
+      WQ_ADMIN_PASSWORD: "${WQ_ADMIN_PASSWORD}"
+    ports:
+      - "${MQTT_PORT:-1883}:1883"      # MQTT 明文（设备接入；可按需关闭宿主映射）
+      - "${MQTT_TLS_PORT:-8883}:8883"  # MQTT over TLS
+    volumes:
+      - ./certs:/etc/wendao/certs:ro
+      - wq-broker-data:/data/broker
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/v1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - wendao-net
+
   mysql:
     image: mysql:8.0
     container_name: wq-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-wendaoiot_dev_root}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
       MYSQL_DATABASE: "${MYSQL_DATABASE:-wendaoiot}"
+      MYSQL_USER: "wendao"                 # 应用专用账号（非 root）
+      MYSQL_PASSWORD: "${MYSQL_APP_PASSWORD}"
       TZ: "Asia/Shanghai"
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --default-time-zone=+08:00
-    ports:
-      - "${MYSQL_PORT:-3306}:3306"
     volumes:
       - wq-mysql-data:/var/lib/mysql
     healthcheck:
@@ -35,33 +84,32 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    networks:
+      - wendao-net
 
-  emqx:
-    image: emqx/emqx:5.8.4
-    container_name: wq-emqx
+  nginx:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.portal
+    image: wendao/portal:latest
+    container_name: wq-nginx
     restart: unless-stopped
-    environment:
-      TZ: "Asia/Shanghai"
-      # Dashboard 初始账号（${EMQX_DASHBOARD_PORT}），避免首次登录强制改密
-      EMQX_DASHBOARD__DEFAULT_USERNAME: "${EMQX_DASHBOARD_USER:-admin}"
-      EMQX_DASHBOARD__DEFAULT_PASSWORD: "${EMQX_DASHBOARD_PASSWORD:-wendaoiot_dash}"
-      # 单节点
-      EMQX_NODE__NAME: "emqx@127.0.0.1"
-      EMQX_CLUSTER__DISCOVERY_STRATEGY: "manual"
-      EMQX_NODE__COOKIE: "${EMQX_NODE_COOKIE:-wqemqxcookie_local}"
+    depends_on:
+      - wendao
     ports:
-      - "${MQTT_PORT:-1883}:1883"          # MQTT 明文
-      - "${EMQX_DASHBOARD_PORT:-18083}:18083" # Dashboard
-      - "${MQTT_WS_PORT:-8083}:8083"       # MQTT over WS
-      - "${MQTT_WSS_PORT:-8084}:8084"      # MQTT over WSS
-      - "${MQTT_TLS_PORT:-8883}:8883"      # MQTT over TLS（证书生成后启用）
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # 默认不占宿主 80（宿主 nginx 通常在用）：门户容器监听 8088，
+      # 再由宿主 nginx 按 server_name 反代；PORTAL_HTTP_PORT 可在 .env 覆盖
+      - "${PORTAL_HTTP_PORT:-8088}:80"
     volumes:
-      - wq-emqx-data:/opt/emqx/data
-      - ./certs:/opt/emqx/certs:ro
-      - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      # wiki 静态站：宿主 /opt/wendao/web/portal 只读挂载
+      - ${WIKI_ROOT:-/opt/wendao/web/portal}:/var/www/wiki:ro
+    networks:
+      - wendao-net
 
 volumes:
   wq-mysql-data:
-  wq-emqx-data:
+  wq-broker-data:
+
+networks:
+  wendao-net:
+    driver: bridge

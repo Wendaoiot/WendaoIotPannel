@@ -32,7 +32,6 @@ docs/*
 
 # Docker stack: secrets, local env and generated certs not tracked
 deploy/docker/.env
-deploy/docker/emqx_api.env
 deploy/docker/certs/
 
 # Linux bare-metal: local deploy config not tracked
@@ -55,3 +54,10 @@ tools/local/emqx_api.env
 # Device runtime logs (may contain real IMEI)
 log.txt
 *.log
+
+# Local scratch/helper scripts (underscore-prefixed, generated locally)
+/_*.bat
+/_*.ps1
+/_*.txt
+/server/_*.bat
+/server/_*.txt

@@ -39,6 +39,7 @@ func TestValidate_RejectsEmptyAndShortSecret(t *testing.T) {
 func TestValidate_AcceptsStrongSecret(t *testing.T) {
 	t.Setenv("WQ_INSECURE", "")
 	t.Setenv("WQ_JWT_SECRET", "this-is-a-very-long-random-secret-0123456789")
+	t.Setenv("WQ_BROKER_SERVER_PASSWORD", "broker-pass-0123456789abcdef")
 	if err := load(t).Validate(); err != nil {
 		t.Fatalf("强密钥应通过校验: %v", err)
 	}
@@ -58,7 +59,9 @@ func TestEnvOverrides(t *testing.T) {
 	t.Setenv("WQ_SERVER_PORT", "9999")
 	t.Setenv("WQ_MYSQL_HOST", "db.example.com")
 	t.Setenv("WQ_MYSQL_DATABASE", "iotdb")
-	t.Setenv("WQ_MQTT_BROKER", "tls://broker.example.com:8883")
+	t.Setenv("WQ_BROKER_LISTEN_PORT", "11883")
+	t.Setenv("WQ_BROKER_TLS_PORT", "18883")
+	t.Setenv("WQ_BROKER_SERVER_USERNAME", "platform")
 
 	cfg := load(t)
 
@@ -71,8 +74,11 @@ func TestEnvOverrides(t *testing.T) {
 	if cfg.MySQL.Host != "db.example.com" || cfg.MySQL.Database != "iotdb" {
 		t.Errorf("WQ_MYSQL_* 未生效, got %+v", cfg.MySQL)
 	}
-	if cfg.MQTT.Broker != "tls://broker.example.com:8883" {
-		t.Errorf("WQ_MQTT_BROKER 未生效, got %q", cfg.MQTT.Broker)
+	if cfg.Broker.ListenPort != 11883 || cfg.Broker.TLSPort != 18883 {
+		t.Errorf("WQ_BROKER_*_PORT 未生效, got %+v", cfg.Broker)
+	}
+	if cfg.Broker.ServerUsername != "platform" {
+		t.Errorf("WQ_BROKER_SERVER_USERNAME 未生效, got %q", cfg.Broker.ServerUsername)
 	}
 }
 
@@ -87,6 +93,29 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.MQTT.ClientID != "wendao_server" {
 		t.Errorf("MQTT 默认 client_id 异常, got %q", cfg.MQTT.ClientID)
+	}
+	if cfg.Broker.ListenPort != 1883 || cfg.Broker.TLSPort != 0 {
+		t.Errorf("无证书时 broker 默认应为 1883/TLS 关闭, got %+v", cfg.Broker)
+	}
+	if cfg.Broker.ServerUsername != "wendao_server" {
+		t.Errorf("broker 默认 server_username 异常, got %q", cfg.Broker.ServerUsername)
+	}
+	// WQ_INSECURE=1 时平台 MQTT 密码回退为同用户名，不应为空
+	if cfg.Broker.ServerPassword == "" {
+		t.Error("WQ_INSECURE=1 时 broker.server_password 应回退非空")
+	}
+}
+
+func TestValidate_RejectsWeakBrokerPassword(t *testing.T) {
+	t.Setenv("WQ_INSECURE", "")
+	t.Setenv("WQ_JWT_SECRET", "this-is-a-very-long-random-secret-0123456789")
+	t.Setenv("WQ_BROKER_SERVER_PASSWORD", "short")
+	if err := load(t).Validate(); err == nil {
+		t.Fatal("过短 broker 密码应被拒绝启动")
+	}
+	t.Setenv("WQ_BROKER_SERVER_PASSWORD", "changeme")
+	if err := load(t).Validate(); err == nil {
+		t.Fatal("弱默认 broker 密码应被拒绝启动")
 	}
 }
 

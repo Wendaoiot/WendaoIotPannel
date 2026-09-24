@@ -23,12 +23,18 @@ import (
 // （QoS1 消息下发 + 设备端处理时间；clean session 设备唯一接收窗口）。
 var dynRegKickGrace = 500 * time.Millisecond
 
+// SessionKicker 互踢能力（由内嵌 broker 实现，main 启动时注入）。
+// username 语义：设备ID / 引导用户名 "SN&ProductKey"；excludeClientID 排除新连接自身。
+type SessionKicker interface {
+	KickByUsername(username, excludeClientID string) ([]string, error)
+}
+
 type Client struct {
 	client mqtt.Client
 	store  *store.Store
 	bus    *events.Bus
 	cfg    Config
-	emqx   *EMQXAdmin
+	kicker SessionKicker // 互踢实现（main 注入内嵌 broker）；nil 时静默禁用
 	mu     sync.RWMutex
 
 	// initialConns 计数 CONNECT 成功次数：首次连接由 main 显式 Subscribe 负责，
@@ -36,12 +42,6 @@ type Client struct {
 	// 之后的断线重连才在 OnConnect 中自动 resubscribe。
 	initialConns int
 }
-
-// EMQX 5.x 系统事件主题（sys_event_messages 默认开启 connected/disconnected）。
-const (
-	sysTopicClientConnected    = "$SYS/brokers/+/clients/+/connected"
-	sysTopicClientDisconnected = "$SYS/brokers/+/clients/+/disconnected"
-)
 
 func New(cfg Config, s *store.Store, bus *events.Bus) (*Client, error) {
 	c := &Client{store: s, cfg: cfg, bus: bus}
@@ -90,24 +90,25 @@ func (c *Client) Subscribe() error {
 		protocol.TopicOTAAckSub():      1,
 		protocol.TopicPeerSub():        1,
 		protocol.TopicRegisterReqSub(): 1,
-		// EMQX 系统事件：实时同步设备上下线（connect 即在线，disconnect 即离线）
-		sysTopicClientConnected:    1,
-		sysTopicClientDisconnected: 1,
 	}
 	token := c.client.SubscribeMultiple(topics, c.onMessage)
 	token.Wait()
 	return token.Error()
 }
 
-// SetEMQXAdmin 注入 EMQX REST 客户端（互踢）。配置缺失时传 nil，互踢静默禁用。
-func (c *Client) SetEMQXAdmin(a *EMQXAdmin) {
-	c.emqx = a
+// SetKicker 注入互踢实现（main 启动时调用，传内嵌 broker）。
+// 未注入时 KickDeviceSessions/kickBootstrap 静默跳过。
+func (c *Client) SetKicker(k SessionKicker) {
+	c.kicker = k
 }
 
-// KickDeviceSessions 踢掉某设备当前的在线会话（互踢入口）。
+// KickDeviceSessions 踢掉某设备当前的在线会话（互踢入口），委托内嵌 broker。
 // excludeClientID 为新连接自身，须排除；传空踢全部。
 func (c *Client) KickDeviceSessions(deviceID, excludeClientID string) ([]string, error) {
-	return c.emqx.KickDeviceSessions(deviceID, excludeClientID)
+	if c.kicker == nil {
+		return nil, nil
+	}
+	return c.kicker.KickByUsername(deviceID, excludeClientID)
 }
 
 // NotifyKicked 主动断开某设备前，向 wendao/{id}/kicked 发布断开原因（QoS1）。
@@ -132,8 +133,6 @@ func (c *Client) resubscribe() {
 		protocol.TopicOTAAckSub():      1,
 		protocol.TopicPeerSub():        1,
 		protocol.TopicRegisterReqSub(): 1,
-		sysTopicClientConnected:        1,
-		sysTopicClientDisconnected:     1,
 	}
 	c.client.SubscribeMultiple(topics, c.onMessage)
 }
@@ -148,13 +147,6 @@ func extractDeviceID(topic string) string {
 
 func (c *Client) onMessage(_ mqtt.Client, msg mqtt.Message) {
 	topic := msg.Topic()
-
-	// EMQX 系统事件：clientid 即设备ID，实时同步在线状态
-	if strings.HasPrefix(topic, "$SYS/brokers/") &&
-		(strings.HasSuffix(topic, "/connected") || strings.HasSuffix(topic, "/disconnected")) {
-		c.handleClientEvent(topic, msg.Payload())
-		return
-	}
 
 	deviceID := extractDeviceID(topic)
 
@@ -647,71 +639,19 @@ func (c *Client) handleDynRegister(topic string, payload []byte) {
 }
 
 // kickBootstrap 踢掉某 SN 的引导连接（username="SN&ProductKey"）。
-// 未配置 EMQX REST 时静默跳过（设备可用新密钥重连触发互踢兜底）。
+// 互踢实现未注入时静默跳过（设备可用新密钥重连触发互踢兑底）。
 func (c *Client) kickBootstrap(sn, productKey string) {
-	if c.emqx == nil || !c.emqx.Enabled() {
+	if c.kicker == nil {
 		return
 	}
 	bootstrapUsername := sn + protocol.BootstrapSep + productKey
-	kicked, err := c.emqx.KickDeviceSessions(bootstrapUsername, "")
+	kicked, err := c.kicker.KickByUsername(bootstrapUsername, "")
 	if err != nil {
 		log.Printf("mqtt dynreg: kick bootstrap %s failed: %v", bootstrapUsername, err)
 		return
 	}
 	if len(kicked) > 0 {
 		log.Printf("mqtt dynreg: kicked bootstrap session(s) %s: %v", bootstrapUsername, kicked)
-	}
-}
-
-// handleClientEvent 处理 EMQX $SYS 客户端上下线事件，实时同步设备状态。
-// 主题形如 $SYS/brokers/<node>/clients/<clientid>/connected|disconnected。
-// clientid 由客户端自选（可能带前缀），设备ID以事件 payload 的 username 字段为准；
-// 平台自身连接忽略。设备连接即置在线，断开即置离线。
-func (c *Client) handleClientEvent(topic string, payload []byte) {
-	parts := strings.Split(topic, "/")
-	// $SYS / brokers / <node> / clients / <clientid> / <event>
-	if len(parts) < 6 {
-		return
-	}
-	clientID := parts[4]
-
-	var ev struct {
-		Username string `json:"username"`
-		Reason   string `json:"reason"`
-	}
-	_ = json.Unmarshal(payload, &ev)
-
-	// 设备接入时 username = 设备ID；取不到时退回 clientid（设备一般以ID为clientid）
-	deviceID := ev.Username
-	if deviceID == "" {
-		deviceID = clientID
-	}
-	if deviceID == "" || deviceID == c.cfg.ClientID {
-		return
-	}
-	// 一型一密引导连接（username="SN&ProductKey"）不参与正常设备在线状态
-	if strings.Contains(deviceID, protocol.BootstrapSep) {
-		return
-	}
-
-	// 仅处理已注册设备；认证失败的 clientid 不会产生 connected 事件
-	if _, err := c.store.GetDevice(deviceID); err != nil {
-		return
-	}
-
-	online := strings.HasSuffix(topic, "/connected")
-	if err := c.store.SetDeviceRuntimeStatus(deviceID, online); err != nil {
-		log.Printf("mqtt client event: set status error: %v", err)
-		return
-	}
-	log.Printf("mqtt client event: %s %s", deviceID, map[bool]string{true: "online", false: "offline"}[online])
-
-	if c.bus != nil {
-		if dev, err := c.store.GetDevice(deviceID); err == nil && dev.TenantID != 0 {
-			c.broadcast(dev.TenantID, "device_status", map[string]interface{}{
-				"device_id": deviceID, "online": online,
-			})
-		}
 	}
 }
 
@@ -844,6 +784,8 @@ func (c *Client) broadcast(tenantID uint, typ string, data interface{}) {
 	c.bus.BroadcastToTenant(tenantID, events.Message{Type: typ, Data: data})
 }
 
+// Config paho 回环连接参数：连接内嵌 broker（127.0.0.1:listen_port），
+// 凭据为 broker.server_username/password（认证按“平台账号”分支放行）。
 type Config struct {
 	Broker   string
 	ClientID string

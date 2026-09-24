@@ -1,70 +1,65 @@
-# Docker 容器栈（MySQL + EMQX）
+# deploy/docker：三容器生产栈
 
-用 Docker Compose 在本机/单机上快速启动 WendaoIotPannel 依赖的 **MySQL 8.0** 与 **EMQX 5.8**。
-生产部署的 systemd/Nginx 示例见根目录 [部署与测试.md](../../部署与测试.md)，协议设计见 [项目说明.md](../../项目说明.md)。
+> EMQX 已移除，MQTT broker（mochi-mqtt，MIT）内嵌进 wendao 容器。
+> 设计与运维详见 [docs/容器化部署运维手册.md](../../docs/容器化部署运维手册.md)、
+> [docs/Broker内嵌改造方案.md](../../docs/Broker内嵌改造方案.md)。
 
-## 包含内容
+## 文件
 
 | 文件 | 说明 |
 | --- | --- |
-| `docker-compose.yml` | MySQL + EMQX 服务定义，全部密码/端口由 `.env` 注入 |
+| `docker-compose.yml` | 三服务：wendao（后端+内嵌 broker）/ mysql / nginx |
 | `.env.example` | 环境变量模板（复制为 `.env`；`.env` 不入库） |
-| `emqx/emqx.conf` | EMQX 覆盖配置：补充 8883 SSL listener |
-| `gen-certs.sh` / `gen-certs.ps1` | 生成 8883 自签 CA 与服务器证书（需要 openssl） |
-| `configure-emqx.py` | 自动配置 EMQX 认证/ACL 链与互踢 API Key（仅 Python 标准库） |
-| `configure-emqx.sh` / `.ps1` | 上述脚本的封装 |
+| `gen-secrets.sh` | 生成强随机密钥版 `.env`（已存在则拒绝覆盖） |
+| `gen-certs.sh` | 生成 8883 自签 CA 与服务器证书（`FORCE_CERTS=1` 轮换） |
+| `Dockerfile.portal` | 门户镜像：构建 web-admin + nginx 服务 + wiki 静态站 |
+| `nginx/pannel.conf` | pannel / wiki 双 server 站点配置 |
+| `../../server/Dockerfile` | 后端镜像：golang:1.25-alpine 多阶段构建 |
 
 ## 快速开始
 
 ```bash
-# 1) 准备环境变量（修改其中所有 change_me 密码）
-cp .env.example .env
+# 1) 生成 .env（强随机密钥）或 cp .env.example .env 手工修改
+./gen-secrets.sh
 
-# 2) 生成 8883 TLS 证书（需要 openssl；Windows PowerShell 用同名 .ps1）
+# 2) 生成 8883 TLS 证书（设备侧需导入 certs/ca.crt）
 ./gen-certs.sh
 
-# 3) 启动容器
+# 3) 构建并启动
+docker compose build
 docker compose up -d
-
-# 4) 等后端（:8080）起来后，配置 EMQX 认证/ACL 链
-./configure-emqx.sh        # Windows PowerShell: ./configure-emqx.ps1
+docker compose ps        # 全部 healthy/running
 ```
-
-启动顺序提示：EMQX 的 HTTP 认证回调指向宿主机后端 `http://host.docker.internal:${SERVER_PORT}`，
-因此应先在宿主机启动 Go 后端（`cd server && go run ./cmd/server/`），再执行 `configure-emqx`。
-`docker compose` 可先于后端启动，配置成功前 broker 对业务连接会拒绝（fail-closed，属预期）。
 
 ## 端口
 
-| 端口 | 服务 |
-| --- | --- |
-| 3306 | MySQL（可用 `MYSQL_PORT` 改） |
-| 1883 | MQTT 明文 |
-| 8883 | MQTT over TLS |
-| 8083 / 8084 | MQTT over WS / WSS |
-| 18083 | EMQX Dashboard |
+| 端口 | 服务 | 说明 |
+| --- | --- | --- |
+| 80 | nginx | web-admin + wiki + `/api` 反代（对公网） |
+| 1883 | wendao | MQTT 明文（设备接入） |
+| 8883 | wendao | MQTT over TLS（设备接入，需导入 ca.crt） |
+| 8080 | wendao | HTTP API，仅容器网内，经 nginx 反代访问 |
+
+> 腾讯云安全组只需放行 `80/TCP`、`1883/TCP`、`8883/TCP`。
+
+## 首次登录
+
+`gen-secrets.sh` 输出管理员初始密码（也在 `.env` 的 `WQ_ADMIN_PASSWORD`）。
+打开 `http://pannel.wendaoiot.com/` → 302 到 `/login` → 用 `admin / <初始密码>` 登录。
 
 ## 常用命令
 
 ```bash
-docker compose ps                 # 查看状态
-docker compose logs -f emqx       # 查看 EMQX 日志
-docker compose down               # 停止
-docker compose down -v            # 停止并删除数据卷（清空数据库重来）
+docker compose ps                    # 状态
+docker compose logs -f wendao        # 后端+broker 日志
+docker compose restart wendao        # 重启后端（证书轮换后）
+docker compose down                  # 停止（保留数据卷）
+docker compose down -v               # 停止并清空 MySQL + broker 会话（慎用）
 ```
-
-## configure-emqx 完成的工作
-
-1. 创建 **内置数据库认证器**（bcrypt）并置于 HTTP 认证器之前；
-2. 在内置库中创建平台超管（后端自身连接 broker，使用 `MQTT_SERVER_USER/PASSWORD`）；
-3. 创建指向后端 `/mqtt/auth`、`/mqtt/acl` 的 HTTP 认证/授权（`X-Auth-Key` = `MQTT_HOOK_SECRET`）；
-4. 设置 `no_match=deny`、`deny_action=disconnect`、关闭授权缓存；
-5. 创建后端互踢用 REST API Key，secret 仅返回一次并写入本地 `emqx_api.env`。
-
-`emqx_api.env` 中的 `WQ_EMQX_API_KEY/SECRET` 需同步到 `server/config.yaml` 的 `emqx` 段
-（或直接用同名环境变量启动后端）。
 
 ## 安全提醒
 
-- `.env`、`emqx_api.env`、`certs/`（含 CA 与服务器私钥）均不入库，请勿提交。
-- 默认密码仅供本地开发；生产环境务必替换全部 `change_me` 值，并只放行 8883、关闭或限制 1883。
+- `.env`、`certs/`（含 CA 与服务器私钥）不入库（根 `.gitignore` 已覆盖）。
+- 管理员初始密码首次登录后尽快修改。
+- 无需再维护任何 EMQX Dashboard/API Key/HTTP 回调配置——认证、ACL、互踢全部在
+  wendao 进程内完成。

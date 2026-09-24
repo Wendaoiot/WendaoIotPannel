@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"wendaoiotpannel/internal/broker"
 	"wendaoiotpannel/internal/config"
 	"wendaoiotpannel/internal/events"
 	"wendaoiotpannel/internal/handler"
@@ -24,11 +25,11 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("config invalid: %v", err)
 	}
-	log.Printf("config loaded: server.port=%d mysql=%s:%d/%s mqtt=%s",
-		cfg.Server.Port, cfg.MySQL.Host, cfg.MySQL.Port, cfg.MySQL.Database, cfg.MQTT.Broker)
+	log.Printf("config loaded: server.port=%d mysql=%s:%d/%s broker.tcp=%d broker.tls=%d",
+		cfg.Server.Port, cfg.MySQL.Host, cfg.MySQL.Port, cfg.MySQL.Database,
+		cfg.Broker.ListenPort, cfg.Broker.TLSPort)
 
 	handler.InitJWTSecret(cfg.Server.JWT)
-	handler.SetMQTTAuthSecret(cfg.Server.MQTTAuthSecret)
 
 	s, err := store.New(cfg.MySQLDSN())
 	if err != nil {
@@ -40,11 +41,31 @@ func main() {
 
 	bus := events.NewBus()
 
+	// 内嵌 MQTT broker（替代外部 EMQX）：设备直连本进程 1883/8883，
+	// 认证/ACL/上下线/互踢全部进程内完成；可选 pebble 持久化。
+	b, err := broker.New(broker.Config{
+		ListenPort:      cfg.Broker.ListenPort,
+		TLSPort:         cfg.Broker.TLSPort,
+		TLSCert:         cfg.Broker.TLSCert,
+		TLSKey:          cfg.Broker.TLSKey,
+		PersistencePath: cfg.Broker.PersistencePath,
+		ServerUsername:  cfg.Broker.ServerUsername,
+		ServerPassword:  cfg.Broker.ServerPassword,
+	}, s, bus)
+	if err != nil {
+		log.Fatalf("create broker: %v", err)
+	}
+	if err := b.Start(); err != nil {
+		log.Fatalf("start broker: %v", err)
+	}
+	defer b.Close()
+
+	// 平台自身业务客户端：paho 回环自连内嵌 broker（凭据按平台账号分支放行）。
 	mc, err := mqttclient.New(mqttclient.Config{
-		Broker:   cfg.MQTT.Broker,
+		Broker:   fmt.Sprintf("tcp://127.0.0.1:%d", cfg.Broker.ListenPort),
 		ClientID: cfg.MQTT.ClientID,
-		Username: cfg.MQTT.Username,
-		Password: cfg.MQTT.Password,
+		Username: cfg.Broker.ServerUsername,
+		Password: cfg.Broker.ServerPassword,
 	}, s, bus)
 	if err != nil {
 		log.Fatalf("create mqtt client: %v", err)
@@ -57,19 +78,16 @@ func main() {
 	}
 	log.Println("MQTT connected and subscribed")
 
-	// EMQX REST 客户端（同设备重复连接互踢）。API Key 未配置时功能静默禁用。
-	if cfg.EMQX.APIBase != "" && cfg.EMQX.APIKey != "" && cfg.EMQX.APISecret != "" {
-		admin := mqttclient.NewEMQXAdmin(cfg.EMQX.APIBase, cfg.EMQX.APIKey, cfg.EMQX.APISecret)
-		mc.SetEMQXAdmin(admin)
-		handler.SetSessionKicker(mc)
-		handler.SetKickedNotifier(mc) // 被踢通知：断开前向 wendao/{id}/kicked 发布原因
-		log.Printf("EMQX admin api enabled: %s (device session kick active)", cfg.EMQX.APIBase)
-	} else {
-		log.Println("EMQX admin api not configured: duplicate device sessions will NOT be kicked")
-	}
+	// 互踢注入：broker 提供踢线能力（handler 互踢 + 引导注册踢线共用），
+	// mqtt.Client 提供被踢通知（broker 内部同理自足）。
+	handler.SetSessionKicker(b)
+	mc.SetKicker(b)
+	handler.SetKickedNotifier(mc) // 被踢通知：断开前向 wendao/{id}/kicked 发布原因
+	log.Printf("embedded broker ready: tcp=:%d tls=:%d (device session kick active)",
+		cfg.Broker.ListenPort, cfg.Broker.TLSPort)
 
 	// 在线状态维护（设备级模式，系统默认 connection）：
-	//   connection — 上下线由 EMQX $SYS connected/disconnected 事件实时驱动，扫描不回收；
+	//   connection — 上下线由内嵌 broker 连接/断开事件实时驱动，扫描不回收；
 	//   report     — 周期扫描按设备 offline_timeout_sec(>0) 或全局 offline_timeout_sec
 	//                判"超时未上报离线"；全局与设备超时都<=0 时该设备不做周期判定；
 	//   ping       — 周期探活，超时不应答由扫描回收。
@@ -132,10 +150,6 @@ func main() {
 	api := r.Group("/api/v1")
 	api.GET("/health", h.HealthCheck)
 	api.POST("/login", h.Login)
-
-	// EMQX 认证/ACL 回调（非用户 JWT，用共享密钥保护）
-	api.POST("/mqtt/auth", h.EMQXAuthenticate)
-	api.POST("/mqtt/acl", h.EMQXACL)
 
 	auth := api.Group("", handler.AuthMiddleware(s))
 	{
